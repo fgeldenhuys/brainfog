@@ -1,0 +1,32 @@
+{
+  "name": "@brainfog/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "db:migrate": "wrangler d1 migrations apply DB --local && wrangler d1 migrations apply DB --remote",
+    "seed": "node scripts/seed.ts"
+  },
+  "dependencies": {
+    "@brainfog/db": "workspace:*",
+    "@brainfog/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "agents": "^0.16.0",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.12.25",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.16.15",
+    "@cloudflare/workers-types": "^4.20260612.1",
+    "@playwright/test": "^1.60.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8",
+    "wrangler": "^4.100.0"
+  }
+}

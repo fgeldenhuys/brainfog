@@ -1,0 +1,17 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "agent": {
+    "architect": {
+      "mode": "subagent"
+    },
+    "implementor": {
+      "mode": "subagent"
+    },
+    "critic": {
+      "mode": "subagent"
+    },
+    "researcher": {
+      "mode": "subagent"
+    }
+  }
+}

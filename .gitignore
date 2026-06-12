@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Cloudflare
+.wrangler/
+
+# Secrets
+.dev.vars
+.env
+.env.*
+
+# Test artifacts
+coverage/
+playwright-report/
+test-results/
+
+# OS
+.DS_Store

@@ -1,0 +1,50 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brainfog",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-12",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "brainfog",
+      "database_id": "4627ecde-2253-47a6-be90-bb310d937c25",
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ],
+
+  "vectorize": [
+    {
+      "binding": "VECTORIZE",
+      "index_name": "brainfog-vectors"
+    }
+  ],
+
+  "ai": {
+    "binding": "AI"
+  },
+
+  "r2_buckets": [
+    {
+      "binding": "DOCUMENTS",
+      "bucket_name": "brainfog-documents"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "BrainfogMCP"
+      }
+    ]
+  },
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BrainfogMCP"]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "brainfog",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @brainfog/worker dev",
+    "build": "pnpm --filter @brainfog/worker build",
+    "check": "biome check .",
+    "typecheck": "tsc -b",
+    "test": "pnpm --filter @brainfog/worker test",
+    "test:e2e": "pnpm --filter @brainfog/worker test:e2e",
+    "db:migrate": "pnpm --filter @brainfog/worker db:migrate",
+    "deploy": "pnpm --filter @brainfog/worker run deploy",
+    "seed": "pnpm --filter @brainfog/worker seed"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.0.0",
+    "typescript": "^6.0.3"
+  }
+}
