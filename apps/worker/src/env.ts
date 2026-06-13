@@ -1,3 +1,4 @@
+import type { D1Migration } from "@cloudflare/vitest-pool-workers";
 import type { BrainfogMCP } from "./mcp";
 
 export interface Env {
@@ -7,4 +8,5 @@ export interface Env {
   DOCUMENTS: R2Bucket;
   MCP_OBJECT: DurableObjectNamespace<BrainfogMCP>;
   BRAINFOG_TOKEN_HASH_SECRET: string;
+  TEST_MIGRATIONS?: D1Migration[];
 }

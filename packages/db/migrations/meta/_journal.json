@@ -8,6 +8,13 @@
       "when": 1781287963221,
       "tag": "0000_silent_groot",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1781290000000,
+      "tag": "0001_memory_model",
+      "breakpoints": true
     }
   ]
 }

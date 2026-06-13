@@ -10,7 +10,7 @@ Accepted — 2026-06-12
 
 ## Decision
 
-We will use Cloudflare R2 to store the full content of each document, one object per document, referenced by `documents.r2_key`. R2 is the canonical store for full document content. D1's `documents` table holds metadata only (title, `r2_key`, `mime_type`, owner, project, timestamps); D1's `document_chunks` table holds per-chunk text derived from that content, which is what gets embedded and upserted into Vectorize (`document_chunk:<id>`, per ADR-005's indexing scheme as extended in `specs/memory-model/spec.md`). Updating a document rewrites its R2 object and re-chunks/re-embeds `document_chunks`.
+We will use Cloudflare R2 to store the full content of each document, one object per document, referenced by `documents.r2_key`. R2 is the canonical store for full document content. D1's `documents` table holds metadata only (title, `r2_key`, `mime_type`, owner, project, timestamps); D1's `document_chunks` table holds per-chunk text derived from that content, which is what gets embedded and upserted into Vectorize using the chunk row ID as the vector ID, per ADR-005's indexing scheme as extended in `specs/memory-model/spec.md`. Updating a document rewrites its R2 object and re-chunks/re-embeds `document_chunks`.
 
 R2 is declared as a binding on the Worker, extending the platform baseline (ADR-001, PBI-001) alongside the existing D1, Vectorize, and Workers AI bindings.
 

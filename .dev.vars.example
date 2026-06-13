@@ -1,0 +1,6 @@
+# Copy this file to .dev.vars for local development.
+# .dev.vars is gitignored and must never be committed (ARCHITECTURE.md invariant 9).
+# This file documents required variable names only — no real values.
+
+# Secret used to hash per-user bearer tokens before storing them in D1 (ADR-004).
+BRAINFOG_TOKEN_HASH_SECRET=

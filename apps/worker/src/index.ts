@@ -14,9 +14,13 @@ app.route("/api/v1", apiRoutes);
 // before the mount so it runs first for every /mcp request.
 app.use("/mcp", authMiddleware);
 app.use("/mcp/*", authMiddleware);
-// Hono's `app.mount()` strips the `/mcp` prefix before invoking the handler
-// (the handler sees `/`), so `BrainfogMCP.serve()` must match against `/`.
-app.mount("/mcp", BrainfogMCP.serve("/").fetch);
+const mcpHandler = BrainfogMCP.serve("/mcp").fetch;
+const mcpExecutionCtx = (c: { executionCtx: unknown; get: (key: "user") => unknown }) =>
+  Object.assign(c.executionCtx as object, {
+    props: { user: c.get("user") },
+  }) as ExecutionContext<unknown>;
+app.all("/mcp", (c) => mcpHandler(c.req.raw, c.env, mcpExecutionCtx(c)));
+app.all("/mcp/*", (c) => mcpHandler(c.req.raw, c.env, mcpExecutionCtx(c)));
 
 app.route("/", uiRoutes);
 

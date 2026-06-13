@@ -1,16 +1,35 @@
-# Skill: Close A PBI
+---
+name: close-pbi
+description: Use when finishing a brainfog PBI: verify implementation against the task and spec, update completion evidence, and prepare closeout without pushing unless asked. Works for OpenCode and Claude Code.
+---
 
-Use this once a PBI's Verification has passed and its scoped DoD items are satisfied.
+# Skill: close-pbi
 
-## Steps
+Use when closing an implemented `tasks/PBI-NNN-*.md`.
 
-1. Confirm every command/check in the PBI's Verification section was actually run and passed — re-run anything that was only reported, not verified.
-2. In the PBI's spec (`specs/<feature>/spec.md`), check off the Definition Of Done items this PBI covered.
-3. If the PBI's Context section noted a follow-up (e.g. updating `AGENTS.md`'s "Current Mode"), do that follow-up now if it's in scope, or open a new PBI for it if it's substantial enough to need its own verification.
-4. Summarize what was actually built/changed and which evidence was produced (for the person/agent that asked — this summary doesn't need to live anywhere after it's communicated).
-5. Delete `tasks/PBI-NNN-*.md`. The PBI's content is now reflected in the code, the spec's checked DoD items, and git history — keeping the file around duplicates that information and goes stale.
+## Required Reading
+
+1. `AGENTS.md`
+2. The target `tasks/PBI-NNN-*.md`
+3. The referenced `specs/<feature>/spec.md`
+4. `ARCHITECTURE.md` and any ADRs named by the spec or PBI
+
+## Workflow
+
+1. Identify the PBI and referenced spec.
+2. Preflight the worktree with `git status --short --branch`; separate intended PBI changes from unrelated or user-owned changes.
+3. Confirm changed files are inside the PBI Scope. If scope expanded, stop and report the mismatch.
+4. If the referenced spec Contract changed, confirm the PBI Refinement Protocol was followed and flag the change for human review.
+5. Run verification: `pnpm check`, `pnpm typecheck`, and `pnpm test`, plus any PBI-specific gates such as `pnpm test:e2e`, `pnpm db:migrate`, or `pnpm build`.
+6. Update completion evidence according to the PBI/spec convention: mark only evidenced DoD checkboxes complete, record exact commands and results, and preserve useful implementation context.
+7. If the repo convention for this PBI is to delete the task after closure, delete only after the spec and completion evidence fully preserve the outcome.
+8. Prepare a closeout summary with files changed, commands run, issue/PR references if present, remaining risks, and required human review flags.
+9. Commit, push, deploy, or close GitHub issues only if the user explicitly requested that external action in this turn.
 
 ## Rules
 
-- Don't close a PBI with unchecked DoD items it claimed to cover — either finish the work, or edit the PBI's Scope to reflect what was actually covered and open a new PBI for the rest before closing this one.
-- If verification revealed the spec itself needs to change, hand off to the architect before closing.
+1. Verification evidence is mandatory. Do not mark a PBI complete based on intent.
+2. Do not close a PBI with failed required gates.
+3. Do not silently close a PBI with unresolved Contract, schema, dependency, auth, provenance, Cloudflare binding, or scope concerns.
+4. Do not push, deploy, or close externally visible GitHub state unless explicitly requested.
+5. Completion evidence must cover brainfog invariants: authenticated `/mcp` and `/api/v1/*` paths, provenance on memory writes, D1 canonical storage, Vectorize rebuildability, and no committed secrets where relevant.

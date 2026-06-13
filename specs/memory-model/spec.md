@@ -10,7 +10,7 @@ The model is loosely based on [OB1](https://github.com/NateBJones-Projects/OB1)'
 
 Every non-junction table introduced here carries `owner_id`, `source`, and timestamps per `ARCHITECTURE.md` invariant 4 (provenance — "every memory has provenance: source agent/tool, user/token, project/scope, timestamps; writes without provenance are rejected"), except `document_chunks`, whose ownership/provenance is derived from its parent `documents` row. `project_id` is added to `thoughts`, `tasks`, `facts`, `documents`, and `time_series_points` (the entities that meaningfully belong to a project); `people` and `projects` themselves are not project-scoped.
 
-This spec also extends ADR-005's Vectorize indexing scheme from "one vector per memory row" to "one vector per embeddable row across three tables" (`thoughts`, `facts`, `document_chunks`), using a namespaced vector ID convention. This is a refinement of ADR-005's implementation detail (the vector ID convention), not a reversal of its Decision (Workers AI + Vectorize, D1 canonical / Vectorize derived) — ADR-005 remains Accepted as-is.
+This spec also extends ADR-005's Vectorize indexing scheme from "one vector per memory row" to "one vector per embeddable row across three tables" (`thoughts`, `facts`, `document_chunks`), using the embedded D1 row ID itself as the Vectorize ID and carrying `kind` in vector metadata. This is a refinement of ADR-005's implementation detail (the vector ID convention), not a reversal of its Decision (Workers AI + Vectorize, D1 canonical / Vectorize derived) — ADR-005 remains Accepted as-is.
 
 PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
@@ -21,10 +21,10 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 - **API Contracts**:
 
   MCP tools exposed under `/mcp` (extending the platform baseline's scaffold, ADR-003), all requiring a valid bearer token (ADR-004) and operating only on rows owned by the authenticated user:
-  - `remember(content, type?, project_id?, links?)` → creates a `thoughts` row (`type` defaults to `observation`), generates its embedding via Workers AI, and upserts it into Vectorize as `thought:<id>`. `links` is an optional `{ people_ids?, task_ids?, fact_ids?, document_ids? }` of existing record IDs (owned by the same user) to associate via the junction tables below.
-  - `record_fact(statement, citations?, confidence?, project_id?, topics?, derived_from?, supersedes_fact_id?)` → creates a `facts` row (`citations` is an array of free-text citation strings, default `[]`; `derived_from` is an optional `{ thought_ids?, fact_ids?, document_ids?, document_chunk_ids? }` of existing record IDs owned by the same user; `supersedes_fact_id` optionally names an existing fact this new fact replaces), generates its embedding, applies derivation/supersession links, and upserts it into Vectorize as `fact:<id>`.
+  - `remember(content, type?, project_id?, links?)` → creates a `thoughts` row (`type` defaults to `observation`), generates its embedding via Workers AI, and upserts it into Vectorize using the thought row `id` as the vector ID. `links` is an optional `{ people_ids?, task_ids?, fact_ids?, document_ids? }` of existing record IDs (owned by the same user) to associate via the junction tables below.
+  - `record_fact(statement, citations?, confidence?, project_id?, topics?, derived_from?, supersedes_fact_id?)` → creates a `facts` row (`citations` is an array of free-text citation strings, default `[]`; `derived_from` is an optional `{ thought_ids?, fact_ids?, document_ids?, document_chunk_ids? }` of existing record IDs owned by the same user; `supersedes_fact_id` optionally names an existing fact this new fact replaces), generates its embedding, applies derivation/supersession links, and upserts it into Vectorize using the fact row `id` as the vector ID.
   - `update_fact(id, statement?, citations?, confidence?, status?, topics?, supersedes_fact_id?, superseded_by_fact_id?)` → updates a fact and its lifecycle fields, re-embedding when `statement` changes. Status changes to `superseded`/`proven_wrong` do not delete the fact or its vector; they preserve recallable history with lifecycle metadata.
-  - `add_document(title, content, project_id?, mime_type?)` → writes `content` to R2 (ADR-008), creates a `documents` row with the resulting `r2_key`, splits `content` into `document_chunks`, and generates+upserts an embedding per chunk as `document_chunk:<id>`.
+  - `add_document(title, content, project_id?, mime_type?)` → writes `content` to R2 (ADR-008), creates a `documents` row with the resulting `r2_key`, splits `content` into `document_chunks`, and generates+upserts an embedding per chunk using the chunk row `id` as the vector ID.
   - `update_document(id, content)` → rewrites the R2 object at the existing `r2_key`, deletes the document's existing `document_chunks` (and their Vectorize vectors), and re-chunks/re-embeds as in `add_document`.
   - `recall(query, kinds?, project_id?, limit?)` → embeds `query`, searches Vectorize filtered by `owner_id` (and `project_id`/`kinds` if given; `kinds` defaults to all of `thought`, `fact`, `document_chunk`), and returns the matching rows from D1 joined with their `kind`. A `document_chunk` result includes its parent `documents.id` and `title`.
   - `create_task(title, description?, project_id?, due_at?, status?, priority?, recurrence?)`, `update_task(id, ...)`, `list_tasks(project_id?, status?)` — CRUD over `tasks`. `recurrence` is nullable structured JSON for recurring tasks; no embedding.
@@ -35,7 +35,9 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
   REST routes under `/api/v1/*` (same auth as the platform baseline) mirror the above for use by the web UI (ADR-007): list/create routes for `projects`, `people`, `tasks`, `facts`, `thoughts`, `documents`, and `time-series-points` (with `GET /api/v1/documents/:id/content` proxying the R2 object), plus `GET /api/v1/recall?q=...` mirroring the `recall` tool. Request/response shapes follow the same fields as the Data Models below; `owner_id` is always derived from the authenticated token and is never accepted from the client.
 
-- **Data Models** (D1, via Drizzle — ADR-002; all `id` columns are app-generated UUIDv4 text; all timestamps are Unix seconds; `created_at`/`updated_at` exist on every non-junction table below except `document_chunks`, whose rows are regenerated rather than updated and therefore carry only `created_at`; `updated_at` is refreshed on every update where present):
+- **Data Models** (D1, via Drizzle — ADR-002; all `id` columns are app-generated typed brainfog IDs; all timestamps are Unix seconds; `created_at`/`updated_at` exist on every non-junction table below except `document_chunks`, whose rows are regenerated rather than updated and therefore carry only `created_at`; `updated_at` is refreshed on every update where present):
+
+  - **ID format**: all app-generated row IDs use lowercase text in the form `bf<random><type>`, where `<random>` is 20 characters of Crockford-style lowercase Base32 using `0123456789abcdefghjkmnpqrstvwxyz`, and `<type>` is a one-character entity suffix. This yields 100 bits of randomness in a compact, URL-safe, recognisable ID (23 characters total). Suffixes are: `r` project, `p` person, `k` task, `f` fact, `s` time_series_point, `d` document, `c` document_chunk, `t` thought, `u` user, and `n` token. Example: `bf8k2m9q4t7v6x1c3n5p0t`.
 
   - **`projects`**
     - `id` (pk), `owner_id` (fk → `users.id`), `source`, `name`, `description` (nullable), `created_at`, `updated_at`.
@@ -52,7 +54,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
   - **`facts`**
     - `id` (pk), `owner_id` (fk → `users.id`), `project_id` (nullable, fk → `projects.id`), `source`, `statement`, `citations` (JSON array of strings, default `[]` — each entry a free-text citation/source reference), `confidence` (real, `CHECK (confidence >= 0.0 AND confidence <= 1.0)`), `status` (`current | superseded | proven_wrong`, default `current`), `supersedes_fact_id` (nullable self-fk → `facts.id`, `ON DELETE SET NULL`), `superseded_by_fact_id` (nullable self-fk → `facts.id`, `ON DELETE SET NULL`), `metadata` (JSON `{ topics: string[] }`, default `{}`), `created_at`, `updated_at`.
     - `status` tracks the claim's lifecycle. `current` means the fact is presently accepted by the user/agent; `superseded` means a newer fact replaces it; `proven_wrong` means later evidence invalidated it rather than merely refining it. `supersedes_fact_id` points from a newer fact to the older fact it replaces; `superseded_by_fact_id` points from an older fact to the newer replacement. The service layer keeps these reciprocal pointers consistent when supersession is requested and rejects self-references.
-    - Embedding of `statement` → Vectorize `fact:<id>`.
+    - Embedding of `statement` → Vectorize vector ID `<id>`.
 
   - **`time_series_points`**
     - `id` (pk), `owner_id` (fk → `users.id`), `project_id` (nullable, fk → `projects.id`), `source`, `series_key` (text), `subject_type` (nullable text), `subject_id` (nullable text), `value` (nullable real), `unit` (nullable text), `observed_at` (timestamp), `metadata` (JSON object, default `{}`), `created_at`, `updated_at`.
@@ -67,11 +69,11 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
   - **`document_chunks`**
     - `id` (pk), `document_id` (fk → `documents.id`, `ON DELETE CASCADE`), `chunk_index` (integer), `content` (text, derived from the R2 object), `created_at`. `UNIQUE (document_id, chunk_index)`.
-    - Embedding of `content` → Vectorize `document_chunk:<id>`. No `owner_id`/`project_id` of its own — derived from the parent `documents` row.
+    - Embedding of `content` → Vectorize vector ID `<id>`. No `owner_id`/`project_id` of its own — derived from the parent `documents` row.
 
   - **`thoughts`**
     - `id` (pk), `owner_id` (fk → `users.id`), `project_id` (nullable, fk → `projects.id`), `source`, `content`, `type` (`observation | idea | reference | person_note`, default `observation`), `metadata` (JSON `{ topics: string[], dates_mentioned: string[] }`, default `{}`), `created_at`, `updated_at`.
-    - Embedding of `content` → Vectorize `thought:<id>`.
+    - Embedding of `content` → Vectorize vector ID `<id>`.
     - `type` describes the nature of the thought; what/who it concerns is expressed via the junction tables below, not via `type` or `metadata`.
 
   - **Thought junction tables** (composite primary key on both columns, both FKs `ON DELETE CASCADE`; no own timestamps):
@@ -91,7 +93,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
   - **Indexes**: `thoughts(owner_id, created_at desc)`, `thoughts(owner_id, project_id)`, `facts(owner_id, project_id)`, `facts(owner_id, status)`, `facts(supersedes_fact_id)`, `facts(superseded_by_fact_id)`, `tasks(owner_id, status)`, `tasks(owner_id, project_id)`, `tasks(owner_id, priority desc)`, `people(owner_id, name)`, `documents(owner_id, project_id)`, `time_series_points(owner_id, series_key, observed_at desc)`, `time_series_points(owner_id, project_id, observed_at desc)`, `time_series_points(owner_id, subject_type, subject_id, observed_at desc)`, plus reverse-lookup indexes on the junction tables' second column (`thought_people(person_id)`, `thought_tasks(task_id)`, `thought_facts(fact_id)`, `thought_documents(document_id)`, `fact_source_thoughts(thought_id)`, `fact_source_facts(source_fact_id)`, `fact_source_documents(document_id)`, `fact_source_document_chunks(document_chunk_id)`) for "what references X" queries.
 
   - **Vectorize index** (single index from the platform baseline, dimension 768 to match `@cf/baai/bge-base-en-v1.5` per ADR-005):
-    - Vector ID format: `<kind>:<id>` where `kind ∈ { thought, fact, document_chunk }` and `<id>` is the corresponding D1 row's `id`.
+    - Vector ID format: `<id>`, exactly matching the D1 row ID for the embedded `thoughts`, `facts`, or `document_chunks` row. The row ID's suffix makes it recognisable in logs, while the metadata `kind` remains the authoritative type for filtering/query behavior.
     - Vector metadata payload: `{ kind, owner_id, project_id }` (`project_id` omitted when the source row's `project_id` is null; `document_chunk` vectors use the parent `documents.owner_id`/`project_id`).
     - Write path: on insert/update of a `thoughts` or `facts` row, or a `document_chunks` row, embed its text (`content`/`statement`/`content` respectively) via Workers AI and upsert to Vectorize with this ID and metadata.
     - Delete path: deleting a `thoughts` or `facts` row deletes its vector by ID; deleting a `documents` row cascades to its `document_chunks` rows, each of whose vectors is also deleted.
@@ -104,7 +106,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
   - No new top-level npm dependencies beyond the platform baseline's (`hono`, `agents`, `drizzle-orm`, etc.). A simple chunking function can be written in-repo; if document chunking later needs a tokenizer/text-splitting library, that is a new dependency subject to `AGENTS.md`'s "ASK" rule at implementation time.
 
 - **Constraints**:
-  - D1 remains canonical for all rows and metadata (`ARCHITECTURE.md` invariant 2, ADR-002); Vectorize remains a derived, rebuildable index (invariant 3, ADR-005), now spanning `thoughts`, `facts`, and `document_chunks` via the namespaced vector ID scheme above.
+  - D1 remains canonical for all rows and metadata (`ARCHITECTURE.md` invariant 2, ADR-002); Vectorize remains a derived, rebuildable index (invariant 3, ADR-005), now spanning `thoughts`, `facts`, and `document_chunks` via the row-ID-as-vector-ID scheme above.
   - R2 is canonical for full document content (ADR-008); `document_chunks` is a derived, re-generatable projection of that content for recall.
   - Every non-junction table except `document_chunks` carries `owner_id`, `source`, `created_at`, `updated_at` (invariant 4); `document_chunks` derives ownership/provenance from its parent `documents` row and carries `created_at`; `thoughts`, `tasks`, `facts`, `documents`, and `time_series_points` additionally carry a nullable `project_id`; `people` and `projects` do not.
   - All `/mcp` tools and `/api/v1/*` routes in this spec sit behind the platform baseline's bearer-token auth (invariant 6, ADR-004); `owner_id` is always derived from the authenticated token, never client-supplied.
@@ -114,25 +116,28 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
 ### Definition Of Done
 
-- [ ] Drizzle schema (`packages/db`) defines `projects`, `people`, `tasks`, `facts`, `documents`, `document_chunks`, `thoughts`, `time_series_points`, `thought_people`, `thought_tasks`, `thought_facts`, `thought_documents`, `fact_source_thoughts`, `fact_source_facts`, `fact_source_documents`, and `fact_source_document_chunks`, with a migration that creates all of them on top of the platform baseline's `users`/`tokens`.
-- [ ] Every non-junction table except `document_chunks` has `owner_id` (fk → `users.id`), `source`, `created_at`, `updated_at`; `document_chunks` derives ownership/provenance from its parent `documents` row and has `created_at`; `thoughts`, `tasks`, `facts`, `documents`, and `time_series_points` additionally have a nullable `project_id` (fk → `projects.id`); `updated_at` is refreshed on every update where present.
-- [ ] `facts.confidence` and `tasks.priority` are constrained to `0.0`-`1.0`; `facts.status` is constrained to `current | superseded | proven_wrong`; `tasks.status` is constrained to `open | in_progress | done | cancelled`; `thoughts.type` is constrained to `observation | idea | reference | person_note`.
-- [ ] `facts.supersedes_fact_id` and `facts.superseded_by_fact_id` are nullable self-references; service logic rejects self-references and keeps reciprocal supersession pointers consistent when a fact supersedes another fact.
-- [ ] `tasks.recurrence` accepts validated recurrence JSON for daily/weekly/monthly/yearly schedules, rejects invalid intervals/days/date ranges, and remains nullable for one-off tasks.
-- [ ] `time_series_points` stores generic timestamped observations with `series_key`, optional subject reference, optional numeric `value`, optional `unit`, and JSON `metadata`, scoped by owner and optionally by project.
-- [ ] An R2 bucket is declared (ADR-008) and bound to the Worker; `documents.r2_key` references the stored content, and `document_chunks` rows exist per document.
-- [ ] The Vectorize index is created with dimension 768; vector IDs follow `<kind>:<id>` for `kind ∈ { thought, fact, document_chunk }`, with metadata `{ kind, owner_id, project_id }`.
-- [ ] `remember` creates a `thoughts` row, embeds and upserts it to Vectorize, and applies any `links` to people/tasks/facts/documents via the junction tables.
-- [ ] `record_fact` creates a `facts` row with zero or more `citations`, optional derivation links to thoughts/facts/documents/document_chunks, optional supersession of an existing fact, and embeds/upserts it to Vectorize.
-- [ ] `update_fact` updates fact fields and lifecycle status, re-embeds when `statement` changes, and preserves vectors for `superseded`/`proven_wrong` facts rather than deleting history.
-- [ ] `add_document` writes content to R2, creates a `documents` row, and creates+embeds `document_chunks`; `update_document` rewrites the R2 object and re-chunks/re-embeds, removing stale chunks and their vectors.
-- [ ] `recall` embeds the query, searches Vectorize scoped to the caller's `owner_id` (optionally filtered by `project_id`/`kinds`), and returns matching rows tagged with their `kind` (document_chunk results include the parent document's `id`/`title`).
-- [ ] Deleting a `thoughts` or `facts` row removes its Vectorize vector; deleting a `documents` row cascades to `document_chunks` and removes all their vectors.
-- [ ] `create_task`/`update_task`/`list_tasks` (including `priority` and `recurrence`), `upsert_person`/`list_people` (including `contact_info`), `create_project`/`list_projects`, and `record_time_series_point`/`list_time_series_points` work over their tables, scoped to the caller's `owner_id`.
-- [ ] `link` adds rows to the relevant junction table(s) for an existing thought, rejecting links to rows owned by a different user.
-- [ ] Derivation junction writes reject links to rows owned by a different user and reject `fact_source_facts` self-links.
-- [ ] `/api/v1/*` list/create routes exist for `projects`, `people`, `tasks`, `facts`, `thoughts`, `documents`, and `time-series-points` (with `GET /api/v1/documents/:id/content` serving the R2 object), plus `GET /api/v1/recall`.
-- [ ] `pnpm test` includes Vitest/Miniflare coverage for: embedding+Vectorize upsert on `remember`/`record_fact`/`add_document`; `recall` returning mixed-kind results scoped by owner; junction-table links created by `remember` and `link`; fact derivation links and supersession lifecycle; recurrence validation on tasks; time-series point append/list behavior; Vectorize/R2 cleanup on delete and on `update_document`.
+- [x] Drizzle schema (`packages/db`) defines `projects`, `people`, `tasks`, `facts`, `documents`, `document_chunks`, `thoughts`, `time_series_points`, `thought_people`, `thought_tasks`, `thought_facts`, `thought_documents`, `fact_source_thoughts`, `fact_source_facts`, `fact_source_documents`, and `fact_source_document_chunks`, with a migration that creates all of them on top of the platform baseline's `users`/`tokens`.
+- [x] Every non-junction table except `document_chunks` has `owner_id` (fk → `users.id`), `source`, `created_at`, `updated_at`; `document_chunks` derives ownership/provenance from its parent `documents` row and has `created_at`; `thoughts`, `tasks`, `facts`, `documents`, and `time_series_points` additionally have a nullable `project_id` (fk → `projects.id`); `updated_at` is refreshed on every update where present.
+- [x] `facts.confidence` and `tasks.priority` are constrained to `0.0`-`1.0`; `facts.status` is constrained to `current | superseded | proven_wrong`; `tasks.status` is constrained to `open | in_progress | done | cancelled`; `thoughts.type` is constrained to `observation | idea | reference | person_note`.
+- [x] `facts.supersedes_fact_id` and `facts.superseded_by_fact_id` are nullable self-references; service logic rejects self-references and keeps reciprocal supersession pointers consistent when a fact supersedes another fact.
+- [x] `tasks.recurrence` accepts validated recurrence JSON for daily/weekly/monthly/yearly schedules, rejects invalid intervals/days/date ranges, and remains nullable for one-off tasks.
+- [x] `time_series_points` stores generic timestamped observations with `series_key`, optional subject reference, optional numeric `value`, optional `unit`, and JSON `metadata`, scoped by owner and optionally by project.
+- [x] An R2 bucket is declared (ADR-008) and bound to the Worker; `documents.r2_key` references the stored content, and `document_chunks` rows exist per document.
+- [x] App-generated row IDs follow `bf<20 lowercase Crockford Base32 chars><type suffix>` with the suffixes defined in this spec.
+- [x] The Vectorize index is created with dimension 768; vector IDs exactly match the D1 row IDs for `thoughts`, `facts`, and `document_chunks`, with metadata `{ kind, owner_id, project_id }`.
+- [x] `remember` creates a `thoughts` row, embeds and upserts it to Vectorize, and applies any `links` to people/tasks/facts/documents via the junction tables.
+- [x] `record_fact` creates a `facts` row with zero or more `citations`, optional derivation links to thoughts/facts/documents/document_chunks, optional supersession of an existing fact, and embeds/upserts it to Vectorize.
+- [x] `update_fact` updates fact fields and lifecycle status, re-embeds when `statement` changes, and preserves vectors for `superseded`/`proven_wrong` facts rather than deleting history.
+- [x] `add_document` writes content to R2, creates a `documents` row, and creates+embeds `document_chunks`; `update_document` rewrites the R2 object and re-chunks/re-embeds, removing stale chunks and their vectors.
+- [x] `recall` embeds the query, searches Vectorize scoped to the caller's `owner_id` (optionally filtered by `project_id`/`kinds`), and returns matching rows tagged with their `kind` (document_chunk results include the parent document's `id`/`title`).
+- [x] Deleting a `thoughts` or `facts` row removes its Vectorize vector; deleting a `documents` row cascades to `document_chunks` and removes all their vectors.
+- [x] `create_task`/`update_task`/`list_tasks` (including `priority` and `recurrence`), `upsert_person`/`list_people` (including `contact_info`), `create_project`/`list_projects`, and `record_time_series_point`/`list_time_series_points` work over their tables, scoped to the caller's `owner_id`.
+- [x] `link` adds rows to the relevant junction table(s) for an existing thought, rejecting links to rows owned by a different user.
+- [x] Derivation junction writes reject links to rows owned by a different user and reject `fact_source_facts` self-links.
+- [x] `/api/v1/*` list/create routes exist for `projects`, `people`, `tasks`, `facts`, `thoughts`, `documents`, and `time-series-points` (with `GET /api/v1/documents/:id/content` serving the R2 object), plus `GET /api/v1/recall`.
+- [x] `pnpm test` includes Vitest/Miniflare coverage for: embedding+Vectorize upsert on `remember`/`record_fact`/`add_document`; `recall` returning mixed-kind results scoped by owner; junction-table links created by `remember` and `link`; fact derivation links and supersession lifecycle; recurrence validation on tasks; time-series point append/list behavior; Vectorize/R2 cleanup on delete and on `update_document`.
+
+Completion evidence: PBI-002 implementation added the Drizzle schema/migration, owner-scoped memory service, authenticated MCP tools, REST routes, R2 document storage, Workers AI/Vectorize side effects, and Vitest/Miniflare coverage. Verified with `pnpm check && pnpm typecheck && pnpm test`, `pnpm db:migrate`, and `pnpm build` on 2026-06-13; all passed.
 
 ### Regression Guardrails
 
@@ -150,7 +155,7 @@ Feature: Memory model
     Given an authenticated user with a valid bearer token
     When they call the "remember" tool with content "Sarah prefers async standups over live meetings"
     Then a new row is created in thoughts owned by that user
-    And an embedding for the thought is upserted into Vectorize as "thought:<id>"
+    And an embedding for the thought is upserted into Vectorize using the thought row id
     And calling "recall" with a semantically similar query returns that thought
 
   Scenario: Recall returns thoughts and facts ranked together
@@ -163,7 +168,7 @@ Feature: Memory model
     Given an authenticated user with a valid bearer token
     When they call "record_fact" with statement "Cloudflare D1 has no native vector type", citations ["developers.cloudflare.com", "github.com/asg017/sqlite-vec"], and confidence 0.95
     Then a new row is created in facts with that statement, both citations, and that confidence
-    And an embedding for the fact is upserted into Vectorize as "fact:<id>"
+    And an embedding for the fact is upserted into Vectorize using the fact row id
 
   Scenario: Recording a derived fact links it to source memories
     Given an authenticated user has an existing thought, fact, document, and document chunk
@@ -204,12 +209,12 @@ Feature: Memory model
     When they call "add_document" with a title and Markdown content
     Then the content is stored in R2 at the document's r2_key
     And one or more document_chunks rows are created for that document
-    And each chunk has an embedding upserted into Vectorize as "document_chunk:<id>"
+    And each chunk has an embedding upserted into Vectorize using the chunk row id
     And calling "recall" with a query matching a chunk's content returns that document together with the matching chunk
 
   Scenario: Deleting a thought removes its embedding
     Given a thought with an existing Vectorize entry
     When the thought is deleted
     Then the thoughts row no longer exists in D1
-    And the corresponding "thought:<id>" vector no longer exists in Vectorize
+    And the corresponding vector id no longer exists in Vectorize
 ```

@@ -15,6 +15,7 @@
 - **brainfog** — the project name, lowercase in prose and code.
 - **`@brainfog/*`** — pnpm workspace package scope (e.g. `@brainfog/worker`, `@brainfog/db`, `@brainfog/shared`).
 - **`BRAINFOG_`** — environment variable / secret name prefix.
+- **Row IDs** — app-generated row IDs are lowercase typed brainfog IDs: `bf<20 lowercase Crockford Base32 chars><type suffix>`, per `specs/memory-model/spec.md`.
 
 ## Current Mode
 
@@ -65,7 +66,7 @@
 - **Edge:** Cloudflare Workers (Hono) expose `/mcp` (MCP over Streamable HTTP via the `agents` SDK's `McpAgent`), `/api/v1/*` REST routes, and a server-rendered web UI.
 - **Data:** D1 holds the memory model (`thoughts`, `people`, `tasks`, `facts`, `documents`, `document_chunks`, `projects`, `time_series_points`, and their junction/derivation tables — `specs/memory-model/spec.md`), users, and tokens; Drizzle owns schema and migrations.
 - **Documents:** R2 stores full document content (`documents.r2_key`, ADR-008); D1 holds document metadata plus chunked text for recall.
-- **Search:** Vectorize holds embedding vectors for `thoughts`, `facts`, and `document_chunks`, keyed as `<kind>:<id>`; Workers AI generates embeddings on write.
+- **Search:** Vectorize holds embedding vectors for `thoughts`, `facts`, and `document_chunks`, keyed by the D1 row ID itself; Workers AI generates embeddings on write, and Vectorize metadata carries `kind`.
 - **Auth:** per-user bearer tokens (hashed in D1), checked by Worker middleware for MCP, REST, and web UI requests.
 - **Agents:** Claude and OpenCode connect to `/mcp` as remote MCP clients over HTTPS with a per-user token.
 
