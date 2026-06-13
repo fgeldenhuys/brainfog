@@ -1014,4 +1014,235 @@ describe("memory model REST service", () => {
     await deleteThought(ownerCtx, thought.id);
     await deleteFact(ownerCtx, fact.id);
   });
+
+  it("MCP prompts/list returns recall-context and save-session-notes", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      { jsonrpc: "2.0", id: 4, method: "prompts/list", params: {} },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const prompts = (
+      response.message as {
+        result?: {
+          prompts?: {
+            name: string;
+            description: string;
+            arguments?: { name: string; required: boolean }[];
+          }[];
+        };
+      }
+    ).result?.prompts;
+    expect(prompts).toBeTruthy();
+    const names = prompts?.map((p) => p.name);
+    expect(names).toContain("recall-context");
+    expect(names).toContain("save-session-notes");
+    const recallPrompt = prompts?.find((p) => p.name === "recall-context");
+    const savePrompt = prompts?.find((p) => p.name === "save-session-notes");
+    expect(recallPrompt?.description).toBeTruthy();
+    expect(savePrompt?.description).toBeTruthy();
+    expect(recallPrompt?.arguments).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "topic", required: false }),
+        expect.objectContaining({ name: "project_id", required: false }),
+      ]),
+    );
+    expect(savePrompt?.arguments).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "project_id", required: false })]),
+    );
+  });
+
+  it("MCP prompts/list is rejected without a valid bearer token", async () => {
+    const response = await authFetch(
+      "/mcp",
+      {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 5,
+          method: "prompts/list",
+          params: {},
+        }),
+      },
+      "invalid-token",
+    );
+    expect(response.status).toBe(401);
+  });
+
+  it("MCP prompts/get recall-context with topic and project_id", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 6,
+        method: "prompts/get",
+        params: {
+          name: "recall-context",
+          arguments: { topic: "supplement adherence", project_id: "test-project-id" },
+        },
+      },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const result = response.message as {
+      result?: {
+        messages?: { role: string; content: { type: string; text: string } }[];
+      };
+    };
+    expect(result.result?.messages).toBeTruthy();
+    expect(result.result?.messages?.length).toBeGreaterThan(0);
+    const content = result.result?.messages?.[0]?.content?.text ?? "";
+    expect(content).toContain("recall");
+    expect(content).toContain('query: "supplement adherence"');
+    expect(content).toContain('project_id: "test-project-id"');
+    expect(content).toContain("supplement adherence");
+    expect(content).toContain("test-project-id");
+  });
+
+  it("MCP prompts/get recall-context with topic only", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "prompts/get",
+        params: {
+          name: "recall-context",
+          arguments: { topic: "meeting notes" },
+        },
+      },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const result = response.message as {
+      result?: {
+        messages?: { role: string; content: { type: string; text: string } }[];
+      };
+    };
+    expect(result.result?.messages).toBeTruthy();
+    const content = result.result?.messages?.[0]?.content?.text ?? "";
+    expect(content).toContain("recall");
+    expect(content).toContain('query: "meeting notes"');
+    expect(content).toContain("meeting notes");
+  });
+
+  it("MCP prompts/get recall-context with no arguments", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "prompts/get",
+        params: {
+          name: "recall-context",
+          arguments: {},
+        },
+      },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const result = response.message as {
+      result?: {
+        messages?: { role: string; content: { type: string; text: string } }[];
+      };
+    };
+    expect(result.result?.messages).toBeTruthy();
+    const content = result.result?.messages?.[0]?.content?.text ?? "";
+    expect(content).toContain("recall");
+    expect(content).toContain("current conversation");
+  });
+
+  it("MCP prompts/get save-session-notes with project_id", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 9,
+        method: "prompts/get",
+        params: {
+          name: "save-session-notes",
+          arguments: { project_id: "test-project-id" },
+        },
+      },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const result = response.message as {
+      result?: {
+        messages?: { role: string; content: { type: string; text: string } }[];
+      };
+    };
+    expect(result.result?.messages).toBeTruthy();
+    const content = result.result?.messages?.[0]?.content?.text ?? "";
+    expect(content).toContain("record_fact");
+    expect(content).toContain("remember");
+    expect(content).toContain("create_task");
+    expect(content).toContain("test-project-id");
+    expect(content).toContain("well-curated memories");
+  });
+
+  it("MCP prompts/get save-session-notes with no arguments", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 10,
+        method: "prompts/get",
+        params: {
+          name: "save-session-notes",
+          arguments: {},
+        },
+      },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const result = response.message as {
+      result?: {
+        messages?: { role: string; content: { type: string; text: string } }[];
+      };
+    };
+    expect(result.result?.messages).toBeTruthy();
+    const content = result.result?.messages?.[0]?.content?.text ?? "";
+    expect(content).toContain("record_fact");
+    expect(content).toContain("remember");
+    expect(content).toContain("create_task");
+    expect(content).not.toContain("Scope all new records to project");
+    expect(content).toContain("well-curated memories");
+  });
+
+  it("existing tools/list still includes ping and memory-model tools", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      { jsonrpc: "2.0", id: 11, method: "tools/list", params: {} },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const names = (
+      response.message as { result?: { tools?: { name: string }[] } }
+    ).result?.tools?.map((tool) => tool.name);
+    expect(names).toContain("ping");
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "remember",
+        "record_fact",
+        "update_fact",
+        "add_document",
+        "update_document",
+        "recall",
+        "create_task",
+        "update_task",
+        "list_tasks",
+        "record_time_series_point",
+        "list_time_series_points",
+        "upsert_person",
+        "list_people",
+        "create_project",
+        "list_projects",
+        "link",
+      ]),
+    );
+  });
 });

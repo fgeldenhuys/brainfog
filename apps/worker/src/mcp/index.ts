@@ -40,6 +40,90 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     const obj = z.record(z.string(), z.unknown()).optional();
     const strings = z.array(z.string()).optional();
 
+    // Register prompts for agent guidance on memory usage
+    this.server.prompt(
+      "recall-context",
+      "Recall relevant context from brainfog memory before proceeding with the current conversation.",
+      {
+        topic: z.string().optional(),
+        project_id: z.string().optional(),
+      },
+      async (args) => {
+        const topic = args.topic ? String(args.topic) : undefined;
+        const projectId = args.project_id ? String(args.project_id) : undefined;
+
+        let scope = "that may be relevant to the current conversation";
+        const recallArgs: string[] = [];
+
+        if (topic && projectId) {
+          scope = `related to "${topic}" in project ${projectId}`;
+          recallArgs.push(`query: "${topic}"`, `project_id: "${projectId}"`);
+        } else if (topic) {
+          scope = `related to "${topic}"`;
+          recallArgs.push(`query: "${topic}"`);
+        } else if (projectId) {
+          scope = `for project ${projectId}`;
+          recallArgs.push(`project_id: "${projectId}"`);
+        }
+
+        const argumentText = recallArgs.length > 0 ? ` with ${recallArgs.join(" and ")}` : "";
+        const message =
+          `Before proceeding, please recall relevant context from brainfog memory ${scope}. ` +
+          "Call the `recall` tool" +
+          argumentText +
+          " to retrieve any stored thoughts, facts, or documents, " +
+          "and incorporate the returned `thought`, `fact`, or `document_chunk` results into your response.";
+
+        return {
+          messages: [
+            {
+              role: "user" as const,
+              content: {
+                type: "text" as const,
+                text: message,
+              },
+            },
+          ],
+        };
+      },
+    );
+
+    this.server.prompt(
+      "save-session-notes",
+      "Persist durable facts, thoughts, and tasks from the current session before finishing.",
+      {
+        project_id: z.string().optional(),
+      },
+      async (args) => {
+        const projectId = args.project_id ? String(args.project_id) : undefined;
+
+        let message =
+          "Before finishing this session, review the conversation for durable content to persist in brainfog memory. " +
+          "Use the following tools to save what is worth remembering:\n\n" +
+          "1. `record_fact`: Save confirmed facts or important decisions with citations and a confidence score (0.0-1.0).\n" +
+          "2. `remember`: Save noteworthy observations, ideas, or insights that may be useful in future conversations.\n" +
+          "3. `create_task`: Create follow-up work items.\n\n" +
+          "As a guiding principle, prefer a few well-curated memories over many low-signal ones. " +
+          "Only persist durable, recallable content that will be useful in future sessions — not a transcript of the entire conversation.";
+
+        if (projectId) {
+          message += ` Scope all new records to project ${projectId}.`;
+        }
+
+        return {
+          messages: [
+            {
+              role: "user" as const,
+              content: {
+                type: "text" as const,
+                text: message,
+              },
+            },
+          ],
+        };
+      },
+    );
+
     const register = <T extends Record<string, z.ZodTypeAny>>(
       name: string,
       description: string,
