@@ -13,5 +13,15 @@
     "researcher": {
       "mode": "subagent"
     }
+  },
+  "mcp": {
+    "brainfog": {
+      "type": "remote",
+      "url": "https://brainfog.francois-wmgc.workers.dev/mcp",
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer {env:BRAINFOG_BEARER_TOKEN}"
+      }
+    }
   }
 }

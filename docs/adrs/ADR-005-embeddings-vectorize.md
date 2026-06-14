@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-06-12
+Accepted — 2026-06-12. Embedding model and dimension choice superseded by ADR-010 — 2026-06-14 (the architecture decision below — Workers AI embeddings + Vectorize for semantic recall, D1 canonical/Vectorize derived — remains in effect).
 
 ## Context
 

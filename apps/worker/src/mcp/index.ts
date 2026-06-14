@@ -37,9 +37,23 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       content: [{ type: "text" as const, text: "pong" }],
     }));
 
-    const any = z.any().optional();
     const obj = z.record(z.string(), z.unknown()).optional();
     const strings = z.array(z.string()).optional();
+    const nullableString = z.string().nullable().optional();
+    const nullableNumber = z.number().nullable().optional();
+    const recurrence = z
+      .object({
+        frequency: z.enum(["daily", "weekly", "monthly", "yearly"]),
+        interval: z.number().int().positive().optional(),
+        days_of_week: z.array(z.number().int().min(0).max(6)).optional(),
+        day_of_month: z.number().int().optional(),
+        timezone: z.string().optional(),
+        starts_at: z.number().optional(),
+        ends_at: z.number().optional(),
+        count: z.number().int().optional(),
+      })
+      .nullable()
+      .optional();
 
     // Register prompts for agent guidance on memory usage
     this.server.prompt(
@@ -170,13 +184,13 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "Update a fact and lifecycle metadata.",
       {
         id: z.string(),
-        statement: any,
-        citations: any,
-        confidence: any,
-        status: any,
-        topics: any,
-        supersedes_fact_id: any,
-        superseded_by_fact_id: any,
+        statement: z.string().optional(),
+        citations: strings,
+        confidence: z.number().min(0).max(1).optional(),
+        status: z.enum(["current", "superseded", "proven_wrong"]).optional(),
+        topics: strings,
+        supersedes_fact_id: nullableString,
+        superseded_by_fact_id: nullableString,
       },
       ({ id, ...args }) => updateFact(this.memoryCtx(), String(id), args),
     );
@@ -213,12 +227,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "Create a task.",
       {
         title: z.string(),
-        description: any,
-        project_id: any,
-        due_at: any,
-        status: any,
-        priority: any,
-        recurrence: any,
+        description: nullableString,
+        project_id: nullableString,
+        due_at: nullableNumber,
+        status: z.enum(["open", "in_progress", "done", "cancelled"]).optional(),
+        priority: z.number().min(0).max(1).optional(),
+        recurrence,
       },
       (args) => createTask(this.memoryCtx(), args),
     );
@@ -227,13 +241,13 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "Update a task.",
       {
         id: z.string(),
-        title: any,
-        description: any,
-        project_id: any,
-        due_at: any,
-        status: any,
-        priority: any,
-        recurrence: any,
+        title: z.string().optional(),
+        description: nullableString,
+        project_id: nullableString,
+        due_at: nullableNumber,
+        status: z.enum(["open", "in_progress", "done", "cancelled"]).optional(),
+        priority: z.number().min(0).max(1).optional(),
+        recurrence,
       },
       ({ id, ...args }) => updateTask(this.memoryCtx(), String(id), args),
     );
@@ -248,20 +262,27 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "Append a generic time-series point.",
       {
         series_key: z.string(),
-        value: any,
-        unit: any,
-        observed_at: any,
-        project_id: any,
-        subject_type: any,
-        subject_id: any,
-        metadata: any,
+        value: nullableNumber,
+        unit: nullableString,
+        observed_at: nullableNumber,
+        project_id: nullableString,
+        subject_type: nullableString,
+        subject_id: nullableString,
+        metadata: obj,
       },
       (args) => recordTimeSeriesPoint(this.memoryCtx(), args),
     );
     register(
       "list_time_series_points",
       "List time-series points.",
-      { series_key: any, project_id: any, subject_type: any, subject_id: any, from: any, to: any },
+      {
+        series_key: z.string().optional(),
+        project_id: z.string().optional(),
+        subject_type: z.string().optional(),
+        subject_id: z.string().optional(),
+        from: z.number().optional(),
+        to: z.number().optional(),
+      },
       (args) => listTimeSeriesPoints(this.memoryCtx(), args as Record<string, string | undefined>),
     );
     register(
@@ -272,7 +293,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         name: z.string(),
         aliases: strings,
         contact_info: obj,
-        notes: any,
+        notes: nullableString,
       },
       (args) => upsertPerson(this.memoryCtx(), args as Parameters<typeof upsertPerson>[1]),
     );
@@ -286,7 +307,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register(
       "create_project",
       "Create a project.",
-      { name: z.string(), description: any },
+      { name: z.string(), description: nullableString },
       (args) => createProject(this.memoryCtx(), args as Parameters<typeof createProject>[1]),
     );
     register("list_projects", "List projects.", {}, () => listProjects(this.memoryCtx()));

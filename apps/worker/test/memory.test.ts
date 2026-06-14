@@ -8,6 +8,7 @@ import {
   factSourceFacts,
   factSourceThoughts,
   facts,
+  people,
   projects,
   tasks,
   thoughtFacts,
@@ -30,6 +31,7 @@ import {
   updateDocument,
   updateFact,
   updateTask,
+  upsertPerson,
 } from "../src/memory";
 
 const TOKEN_A = "memory-token-a";
@@ -713,6 +715,41 @@ describe("memory model REST service", () => {
     expect(unchanged?.projectId).toBeNull();
   });
 
+  it("upsert_person update preserves omitted fields and clears explicit ones", async () => {
+    const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+    const created = await upsertPerson(ctx, {
+      name: "Ada Lovelace",
+      aliases: ["Ada"],
+      contact_info: { email: "ada@example.com" },
+      notes: "Mathematician",
+    });
+
+    const renamed = await upsertPerson(ctx, { id: created.id, name: "Ada King" });
+    expect(renamed).toMatchObject({
+      name: "Ada King",
+      aliases: ["Ada"],
+      contactInfo: { email: "ada@example.com" },
+      notes: "Mathematician",
+    });
+
+    const cleared = await upsertPerson(ctx, {
+      id: created.id,
+      name: "Ada King",
+      aliases: [],
+      contact_info: {},
+      notes: null,
+    });
+    expect(cleared).toMatchObject({ aliases: [], contactInfo: {}, notes: null });
+
+    expect(
+      (await createDb(env.DB).select().from(people).where(eq(people.id, created.id)))[0],
+    ).toMatchObject({ name: "Ada King", aliases: [], contactInfo: {}, notes: null });
+
+    await expect(
+      upsertPerson(ctx, { id: "bfdoesnotexist0000000000p", name: "Nobody" }),
+    ).rejects.toMatchObject({ status: 404 });
+  });
+
   it("failed cross-user remember does not leave parent thoughts or partial links", async () => {
     const ownPerson = await json<{ id: string }>(
       await authFetch("/api/v1/people", {
@@ -816,7 +853,7 @@ describe("memory model REST service", () => {
       DB: env.DB,
       DOCUMENTS: env.DOCUMENTS,
       VECTORIZE: { upsert, deleteByIds, query: vi.fn() },
-      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 768 }, () => 0.25)] })) },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
     } as unknown as typeof env;
     const ctx = {
       env: serviceEnv,
@@ -898,7 +935,7 @@ describe("memory model REST service", () => {
           ],
         })),
       },
-      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 768 }, () => 0.25)] })) },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
     } as unknown as typeof env;
     const results = await recall(
       { env: vectorEnv, user: { id: "user-memory-a", name: "Memory A" }, source: "test" },
@@ -941,7 +978,7 @@ describe("memory model REST service", () => {
       DB: env.DB,
       DOCUMENTS: env.DOCUMENTS,
       VECTORIZE: { upsert: vi.fn(), deleteByIds: vi.fn(), query },
-      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 768 }, () => 0.25)] })) },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
     } as unknown as typeof env;
 
     const results = await recall(
@@ -966,7 +1003,7 @@ describe("memory model REST service", () => {
       DB: env.DB,
       DOCUMENTS: env.DOCUMENTS,
       VECTORIZE: { upsert, deleteByIds, query },
-      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 768 }, () => 0.25)] })) },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
     } as unknown as typeof env;
     const ctx = {
       env: serviceEnv,
@@ -1011,7 +1048,7 @@ describe("memory model REST service", () => {
       DB: env.DB,
       DOCUMENTS: env.DOCUMENTS,
       VECTORIZE: { upsert, deleteByIds, query: vi.fn() },
-      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 768 }, () => 0.25)] })) },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
     } as unknown as typeof env;
     const ownerCtx = {
       env: serviceEnv,

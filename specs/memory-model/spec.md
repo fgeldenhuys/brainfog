@@ -12,7 +12,7 @@ Every non-junction table introduced here carries `owner_id`, `source`, and times
 
 This spec also extends ADR-005's Vectorize indexing scheme from "one vector per memory row" to "one vector per embeddable row across three tables" (`thoughts`, `facts`, `document_chunks`), using the embedded D1 row ID itself as the Vectorize ID and carrying `kind` in vector metadata. This is a refinement of ADR-005's implementation detail (the vector ID convention), not a reversal of its Decision (Workers AI + Vectorize, D1 canonical / Vectorize derived) — ADR-005 remains Accepted as-is.
 
-PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
+PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec. PBI-004 (`tasks/PBI-004-embedding-model-upgrade.md`) updates the embedding model and Vectorize dimension per ADR-010.
 
 **Out of scope for this spec** (noted so future specs know where to extend, not because they're forgotten): task assignees other than the owner, person-to-project association, and document versioning/history.
 
@@ -29,7 +29,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
   - `recall(query, kinds?, project_id?, limit?)` → embeds `query`, searches Vectorize filtered by `owner_id` (and `project_id`/`kinds` if given; `kinds` defaults to all of `thought`, `fact`, `document_chunk`), and returns the matching rows from D1 joined with their `kind`. A `document_chunk` result includes its parent `documents.id` and `title`.
   - `create_task(title, description?, project_id?, due_at?, status?, priority?, recurrence?)`, `update_task(id, ...)`, `list_tasks(project_id?, status?)` — CRUD over `tasks`. `recurrence` is nullable structured JSON for recurring tasks; no embedding.
   - `record_time_series_point(series_key, value?, unit?, observed_at?, project_id?, subject_type?, subject_id?, metadata?)`, `list_time_series_points(series_key?, project_id?, subject_type?, subject_id?, from?, to?)` — append/list generic time-series observations for anything the user tracks over time.
-  - `upsert_person(name, aliases?, contact_info?, notes?)`, `list_people()` — CRUD over `people`. No embedding.
+  - `upsert_person(id?, name, aliases?, contact_info?, notes?)`, `list_people()` — CRUD over `people`. No embedding. When `id` names an existing person, `aliases`/`contact_info`/`notes` are partial-update fields: omitting one preserves its current stored value, while an explicit value (including `[]`, `{}`, or `null`) replaces it.
   - `create_project(name, description?)`, `list_projects()` — CRUD over `projects`.
   - `link(thought_id, { people_ids?, task_ids?, fact_ids?, document_ids? })` → adds rows to the junction tables for an existing thought (in addition to the inline `links` on `remember`).
 
@@ -92,7 +92,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
   - **Indexes**: `thoughts(owner_id, created_at desc)`, `thoughts(owner_id, project_id)`, `facts(owner_id, project_id)`, `facts(owner_id, status)`, `facts(supersedes_fact_id)`, `facts(superseded_by_fact_id)`, `tasks(owner_id, status)`, `tasks(owner_id, project_id)`, `tasks(owner_id, priority desc)`, `people(owner_id, name)`, `documents(owner_id, project_id)`, `time_series_points(owner_id, series_key, observed_at desc)`, `time_series_points(owner_id, project_id, observed_at desc)`, `time_series_points(owner_id, subject_type, subject_id, observed_at desc)`, plus reverse-lookup indexes on the junction tables' second column (`thought_people(person_id)`, `thought_tasks(task_id)`, `thought_facts(fact_id)`, `thought_documents(document_id)`, `fact_source_thoughts(thought_id)`, `fact_source_facts(source_fact_id)`, `fact_source_documents(document_id)`, `fact_source_document_chunks(document_chunk_id)`) for "what references X" queries.
 
-  - **Vectorize index** (single index from the platform baseline, dimension 768 to match `@cf/baai/bge-base-en-v1.5` per ADR-005):
+  - **Vectorize index** (single index from the platform baseline, dimension 1024 to match `@cf/qwen/qwen3-embedding-0.6b` per ADR-010):
     - Vector ID format: `<id>`, exactly matching the D1 row ID for the embedded `thoughts`, `facts`, or `document_chunks` row. The row ID's suffix makes it recognisable in logs, while the metadata `kind` remains the authoritative type for filtering/query behavior.
     - Vector metadata payload: `{ kind, owner_id, project_id }` (`project_id` omitted when the source row's `project_id` is null; `document_chunk` vectors use the parent `documents.owner_id`/`project_id`).
     - Write path: on insert/update of a `thoughts` or `facts` row, or a `document_chunks` row, embed its text (`content`/`statement`/`content` respectively) via Workers AI and upsert to Vectorize with this ID and metadata.
@@ -110,7 +110,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
   - R2 is canonical for full document content (ADR-008); `document_chunks` is a derived, re-generatable projection of that content for recall.
   - Every non-junction table except `document_chunks` carries `owner_id`, `source`, `created_at`, `updated_at` (invariant 4); `document_chunks` derives ownership/provenance from its parent `documents` row and carries `created_at`; `thoughts`, `tasks`, `facts`, `documents`, and `time_series_points` additionally carry a nullable `project_id`; `people` and `projects` do not.
   - All `/mcp` tools and `/api/v1/*` routes in this spec sit behind the platform baseline's bearer-token auth (invariant 6, ADR-004); `owner_id` is always derived from the authenticated token, never client-supplied.
-  - Embedding model and dimension are fixed at `@cf/baai/bge-base-en-v1.5` / 768 (ADR-005) — the Vectorize index must be created with dimension 768. This differs from OB1's 1536-dimension OpenAI embeddings; OB1's schema is a reference for shape, not for embedding configuration.
+  - Embedding model and dimension are fixed at `@cf/qwen/qwen3-embedding-0.6b` / 1024 (ADR-010) — the Vectorize index must be created with dimension 1024. This differs from OB1's 1536-dimension OpenAI embeddings; OB1's schema is a reference for shape, not for embedding configuration.
 
 ## Contract
 
@@ -124,7 +124,7 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 - [x] `time_series_points` stores generic timestamped observations with `series_key`, optional subject reference, optional numeric `value`, optional `unit`, and JSON `metadata`, scoped by owner and optionally by project.
 - [x] An R2 bucket is declared (ADR-008) and bound to the Worker; `documents.r2_key` references the stored content, and `document_chunks` rows exist per document.
 - [x] App-generated row IDs follow `bf<20 lowercase Crockford Base32 chars><type suffix>` with the suffixes defined in this spec.
-- [x] The Vectorize index is created with dimension 768; vector IDs exactly match the D1 row IDs for `thoughts`, `facts`, and `document_chunks`, with metadata `{ kind, owner_id, project_id }`.
+- [x] The Vectorize index is created with dimension 1024; vector IDs exactly match the D1 row IDs for `thoughts`, `facts`, and `document_chunks`, with metadata `{ kind, owner_id, project_id }`.
 - [x] `remember` creates a `thoughts` row, embeds and upserts it to Vectorize, and applies any `links` to people/tasks/facts/documents via the junction tables.
 - [x] `record_fact` creates a `facts` row with zero or more `citations`, optional derivation links to thoughts/facts/documents/document_chunks, optional supersession of an existing fact, and embeds/upserts it to Vectorize.
 - [x] `update_fact` updates fact fields and lifecycle status, re-embeds when `statement` changes, and preserves vectors for `superseded`/`proven_wrong` facts rather than deleting history.
@@ -139,10 +139,12 @@ PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec.
 
 Completion evidence: PBI-002 implementation added the Drizzle schema/migration, owner-scoped memory service, authenticated MCP tools, REST routes, R2 document storage, Workers AI/Vectorize side effects, and Vitest/Miniflare coverage. Verified with `pnpm check && pnpm typecheck && pnpm test`, `pnpm db:migrate`, and `pnpm build` on 2026-06-13; all passed.
 
+PBI-004 (ADR-010, 2026-06-14) switched the embedding model to `@cf/qwen/qwen3-embedding-0.6b` and the Vectorize index dimension to 1024: `apps/worker/src/memory.ts` and `apps/worker/test/memory.test.ts` updated and verified with `pnpm check && pnpm typecheck && pnpm test` (31/31 passed) and `pnpm build`. The deployed `brainfog-vectors` index was deleted and recreated at dimension 1024 (cosine) with `owner_id`/`kind`/`project_id` metadata indexes, and all memory-model D1 rows were cleared (test data only; `users` and `tokens` preserved). The Worker was deployed (version `71f9fde0-b164-42d1-9b89-85c1d28fb7d8`) and verified end-to-end via the live MCP endpoint: `ping`, `remember`, `record_fact`, and `recall` (semantic scores 0.6897 and 0.8572 on the new 1024-dim index; `kind` metadata filtering returned results immediately, `project_id` filtering fell back to D1 while its metadata index finished propagating). Verification records were removed from D1/Vectorize afterward per this repo's own-codebase rule (`CLAUDE.md`/`ARCHITECTURE.md`).
+
 ### Regression Guardrails
 
 - The platform baseline's bearer-token middleware and `/api/v1/health`/`/api/v1/whoami` behavior (`specs/platform-setup/spec.md`) must continue to pass unchanged — this spec only adds tables, tools, and routes.
-- Existing Vectorize/Workers AI bindings from the platform baseline must remain usable with the same dimension (768); this spec does not change the embedding model.
+- The Vectorize and Workers AI bindings declared in the platform baseline (`apps/worker/wrangler.jsonc`: `VECTORIZE` binding to `brainfog-vectors`, `AI` binding) are unchanged by this spec — only the embedding model (`@cf/qwen/qwen3-embedding-0.6b`, ADR-010) and the Vectorize index's dimension (1024) change.
 - All new tables and routes must enforce `owner_id` scoping — no query in this spec may return or modify another user's rows, even when given a valid ID.
 - Fact derivation links and time-series subject references must not become cross-user side channels; known in-model references are validated against the caller's `owner_id` before write or read.
 

@@ -25,7 +25,7 @@ export type MemoryUser = { id: string; name: string; selfPersonId?: string | nul
 type Ctx = { env: Env; user: MemoryUser; source?: string };
 
 const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
-const model = "@cf/baai/bge-base-en-v1.5";
+const model = "@cf/qwen/qwen3-embedding-0.6b";
 const suffix = {
   project: "r",
   person: "p",
@@ -85,7 +85,7 @@ async function ensureProject(ctx: Ctx, id?: string | null) {
 async function embed(ctx: Ctx, text: string): Promise<number[]> {
   if (ctx.env.TEST_MIGRATIONS) {
     return Array.from(
-      { length: 768 },
+      { length: 1024 },
       (_, i) => (text.charCodeAt(i % Math.max(text.length, 1)) % 31) / 31,
     );
   }
@@ -98,7 +98,7 @@ async function embed(ctx: Ctx, text: string): Promise<number[]> {
     // Local tests may not have a real Workers AI emulator response; keep D1 canonical and let Vectorize be rebuildable.
   }
   return Array.from(
-    { length: 768 },
+    { length: 1024 },
     (_, i) => (text.charCodeAt(i % Math.max(text.length, 1)) % 31) / 31,
   );
 }
@@ -181,17 +181,16 @@ export async function upsertPerson(
         .limit(1)
     )[0];
     if (!existing) throw new MemoryError(404, "person not found");
-    await db
-      .update(people)
-      .set({
-        name: input.name,
-        aliases: input.aliases ?? [],
-        contactInfo: input.contact_info ?? {},
-        notes: input.notes ?? null,
-        updatedAt: now(),
-      })
-      .where(eq(people.id, input.id));
-    return (await db.select().from(people).where(eq(people.id, input.id)))[0];
+    const updated = {
+      ...existing,
+      name: input.name,
+      aliases: input.aliases === undefined ? existing.aliases : input.aliases,
+      contactInfo: input.contact_info === undefined ? existing.contactInfo : input.contact_info,
+      notes: input.notes === undefined ? existing.notes : input.notes,
+      updatedAt: now(),
+    };
+    await db.update(people).set(updated).where(eq(people.id, input.id));
+    return updated;
   }
   const row = {
     id: createId("person"),
