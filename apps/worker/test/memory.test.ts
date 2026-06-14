@@ -941,6 +941,16 @@ describe("memory model REST service", () => {
       }),
     });
     expect(rejected.status).toBe(404);
+
+    const rejectedDependent = await authFetch("/api/v1/dependencies", {
+      method: "POST",
+      body: JSON.stringify({
+        dependent: { kind: "fact", id: otherFact.id },
+        dependency: { kind: "thought", id: thought.id },
+        relationship: "derived_from",
+      }),
+    });
+    expect(rejectedDependent.status).toBe(404);
   });
 
   it("migration SQL moves pre-graph relationships to dependency_edges and drops redundant shapes", () => {

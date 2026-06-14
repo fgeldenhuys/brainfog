@@ -262,13 +262,13 @@ async function cleanDocumentChunkGraphEdges(
   ctx: Ctx,
   documentId: string,
   chunkIds: string[],
-  options: { retargetDependencyEdgesToDocument: boolean; staleReason: string },
+  retarget?: { staleReason: string },
 ) {
   if (chunkIds.length === 0) return;
   const db = createDb(ctx.env.DB);
-  const timestamp = now();
 
-  if (options.retargetDependencyEdgesToDocument) {
+  if (retarget) {
+    const timestamp = now();
     const dependencyEdgesFromChunks = await db
       .select()
       .from(dependencyEdges)
@@ -306,7 +306,7 @@ async function cleanDocumentChunkGraphEdges(
       if (existingDocumentEdge) {
         await db
           .update(dependencyEdges)
-          .set({ staleAt: timestamp, staleReason: options.staleReason, updatedAt: timestamp })
+          .set({ staleAt: timestamp, staleReason: retarget.staleReason, updatedAt: timestamp })
           .where(eq(dependencyEdges.id, existingDocumentEdge.id));
         await db.delete(dependencyEdges).where(eq(dependencyEdges.id, edge.id));
       } else {
@@ -316,24 +316,12 @@ async function cleanDocumentChunkGraphEdges(
             dependencyKind: "document",
             dependencyId: documentId,
             staleAt: timestamp,
-            staleReason: options.staleReason,
+            staleReason: retarget.staleReason,
             updatedAt: timestamp,
           })
           .where(eq(dependencyEdges.id, edge.id));
       }
     }
-  } else {
-    await db
-      .update(dependencyEdges)
-      .set({ staleAt: timestamp, staleReason: options.staleReason, updatedAt: timestamp })
-      .where(
-        and(
-          eq(dependencyEdges.ownerId, ctx.user.id),
-          eq(dependencyEdges.dependencyKind, "document_chunk"),
-          inArray(dependencyEdges.dependencyId, chunkIds),
-          inArray(dependencyEdges.relationship, staleRelationships),
-        ),
-      );
   }
 
   await db
@@ -1064,13 +1052,16 @@ export async function updateFact(ctx: Ctx, id: string, input: Record<string, unk
   const supersededByFactId = updatesSupersededBy
     ? (input.superseded_by_fact_id as string | null)
     : current.supersededByFactId;
+  const status =
+    (input.status as string | undefined) ??
+    (updatesSupersededBy && supersededByFactId ? "superseded" : row.status);
   await db
     .update(facts)
     .set({
       statement,
       citations: (input.citations as string[] | undefined) ?? row.citations,
       confidence: input.confidence === undefined ? row.confidence : Number(input.confidence),
-      status: (input.status as string | undefined) ?? row.status,
+      status,
       metadata: input.topics ? { topics: input.topics as string[] } : row.metadata,
       updatedAt: now(),
     })
@@ -1250,7 +1241,9 @@ export async function updateDocument(
     ctx,
     id,
     oldChunks.map((c) => c.id),
-    { retargetDependencyEdgesToDocument: true, staleReason: "document_chunks_replaced" },
+    {
+      staleReason: "document_chunks_replaced",
+    },
   );
   await deleteVectors(
     ctx,
@@ -1591,7 +1584,6 @@ export async function deleteDocument(ctx: Ctx, id: string) {
     ctx,
     id,
     chunkIds.map((c) => c.id),
-    { retargetDependencyEdgesToDocument: false, staleReason: "document_deleted" },
   );
   await deleteVectors(
     ctx,
