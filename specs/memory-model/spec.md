@@ -12,7 +12,7 @@ Every non-junction table introduced here carries `owner_id`, `source`, and times
 
 This spec also extends ADR-005's Vectorize indexing scheme from "one vector per memory row" to "one vector per embeddable row across three tables" (`thoughts`, `facts`, `document_chunks`), using the embedded D1 row ID itself as the Vectorize ID and carrying `kind` in vector metadata. This is a refinement of ADR-005's implementation detail (the vector ID convention), not a reversal of its Decision (Workers AI + Vectorize, D1 canonical / Vectorize derived) — ADR-005 remains Accepted as-is.
 
-PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec. PBI-004 (`tasks/PBI-004-embedding-model-upgrade.md`) updates the embedding model and Vectorize dimension per ADR-010.
+PBI-002 (`tasks/PBI-002-memory-model.md`) implements this spec. PBI-004 (`tasks/PBI-004-embedding-model-upgrade.md`) updates the embedding model and Vectorize dimension per ADR-010. PBI-005 (`tasks/PBI-005-dependency-graph.md`, `specs/dependency-graph/spec.md`) supersedes this spec's one-off relationship storage: thought junction tables, fact derivation junction tables, fact supersession pointer fields, and time-series subject fields move to the generic dependency graph.
 
 **Out of scope for this spec** (noted so future specs know where to extend, not because they're forgotten): task assignees other than the owner, person-to-project association, and document versioning/history.
 
