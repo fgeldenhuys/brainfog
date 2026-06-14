@@ -149,7 +149,7 @@ describe("memory model REST service", () => {
       .onConflictDoNothing();
   });
 
-  it("creates projects, people, tasks, thoughts with provenance and owner-scoped links", async () => {
+  it("creates projects, global people, tasks, thoughts with provenance and scoped non-person links", async () => {
     const project = await json<{ id: string }>(
       await authFetch("/api/v1/projects", {
         method: "POST",
@@ -181,15 +181,122 @@ describe("memory model REST service", () => {
     expect(whoami.self_person_id).toBe(person.id);
     expect(whoami.self_person.id).toBe(person.id);
 
-    const crossUserSelf = await authFetch(
+    const peopleForOtherUser = await json<{ id: string }[]>(
+      await authFetch("/api/v1/people", {}, TOKEN_B),
+    );
+    expect(peopleForOtherUser.map((p) => p.id)).toContain(person.id);
+
+    const updatedByOtherUser = await json<{ id: string; name: string; ownerId: string }>(
+      await authFetch(
+        "/api/v1/people",
+        {
+          method: "POST",
+          body: JSON.stringify({ id: person.id, name: "Sarah Global", notes: "shared pool" }),
+        },
+        TOKEN_B,
+      ),
+    );
+    expect(updatedByOtherUser).toMatchObject({
+      id: person.id,
+      name: "Sarah Global",
+      ownerId: "user-memory-a",
+    });
+
+    const peopleForOriginalUser = await json<{ id: string; name: string }[]>(
+      await authFetch("/api/v1/people"),
+    );
+    expect(peopleForOriginalUser).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: person.id, name: "Sarah Global" })]),
+    );
+
+    const crossUserSelf = await json<{ self_person_id: string; self_person: { id: string } }>(
+      await authFetch(
+        "/api/v1/whoami",
+        {
+          method: "PATCH",
+          body: JSON.stringify({ self_person_id: person.id }),
+        },
+        TOKEN_B,
+      ),
+    );
+    expect(crossUserSelf.self_person_id).toBe(person.id);
+    expect(crossUserSelf.self_person.id).toBe(person.id);
+
+    const whoamiOtherUser = await json<{ self_person_id: string; self_person: { id: string } }>(
+      await authFetch("/api/v1/whoami", {}, TOKEN_B),
+    );
+    expect(whoamiOtherUser.self_person_id).toBe(person.id);
+    expect(whoamiOtherUser.self_person.id).toBe(person.id);
+
+    const otherUserThought = await json<{ id: string; ownerId: string }>(
+      await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            content: "Other user can reference the same global person",
+            links: { people_ids: [person.id] },
+          }),
+        },
+        TOKEN_B,
+      ),
+    );
+    expect(otherUserThought.ownerId).toBe("user-memory-b");
+    expect(
+      (
+        await createDb(env.DB)
+          .select()
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.ownerId, "user-memory-b"),
+              eq(dependencyEdges.dependentId, otherUserThought.id),
+              eq(dependencyEdges.dependencyId, person.id),
+              eq(dependencyEdges.relationship, "references"),
+            ),
+          )
+      )[0],
+    ).toBeTruthy();
+
+    const clearOtherSelf = await authFetch(
       "/api/v1/whoami",
       {
         method: "PATCH",
-        body: JSON.stringify({ self_person_id: person.id }),
+        body: JSON.stringify({ self_person_id: null }),
       },
       TOKEN_B,
     );
-    expect(crossUserSelf.status).toBe(404);
+    expect(clearOtherSelf.status).toBe(200);
+
+    const otherUserPersonDependencies = await json<{ dependentId: string; dependencyId: string }[]>(
+      await authFetch(
+        `/api/v1/dependencies?entity_kind=person&entity_id=${person.id}&direction=downstream`,
+        {},
+        TOKEN_B,
+      ),
+    );
+    expect(otherUserPersonDependencies).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dependentId: otherUserThought.id, dependencyId: person.id }),
+      ]),
+    );
+
+    const otherUserPersonPoint = await json<{ id: string; subjectType: string; subjectId: string }>(
+      await authFetch(
+        "/api/v1/time-series-points",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            series_key: "person.interaction_count",
+            value: 1,
+            subject_type: "person",
+            subject_id: person.id,
+          }),
+        },
+        TOKEN_B,
+      ),
+    );
+    expect(otherUserPersonPoint).toMatchObject({ subjectType: "person", subjectId: person.id });
 
     const task = await json<{ id: string }>(
       await authFetch("/api/v1/tasks", {
@@ -235,7 +342,7 @@ describe("memory model REST service", () => {
       "/api/v1/thoughts",
       {
         method: "POST",
-        body: JSON.stringify({ content: "bad cross link", links: { people_ids: [person.id] } }),
+        body: JSON.stringify({ content: "bad cross link", links: { task_ids: [task.id] } }),
       },
       TOKEN_B,
     );
@@ -1162,6 +1269,74 @@ describe("memory model REST service", () => {
     await expect(
       upsertPerson(ctx, { id: "bfdoesnotexist0000000000p", name: "Nobody" }),
     ).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("marks all owners' person dependency edges stale when another user updates a global person", async () => {
+    const person = await json<{ id: string }>(
+      await authFetch("/api/v1/people", {
+        method: "POST",
+        body: JSON.stringify({ name: "Global Observed Person" }),
+      }),
+    );
+    const thought = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({ content: "User A observes the global person" }),
+      }),
+    );
+    await json(
+      await authFetch("/api/v1/dependencies", {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "thought", id: thought.id },
+          dependency: { kind: "person", id: person.id },
+          relationship: "observes_subject",
+        }),
+      }),
+    );
+
+    await json(
+      await authFetch(
+        "/api/v1/people",
+        {
+          method: "POST",
+          body: JSON.stringify({ id: person.id, name: "Global Observed Person Updated" }),
+        },
+        TOKEN_B,
+      ),
+    );
+
+    const userAEdges = await json<
+      {
+        dependentId: string;
+        dependencyId: string;
+        staleAt: number | null;
+        staleReason: string | null;
+      }[]
+    >(
+      await authFetch(
+        `/api/v1/dependencies?entity_kind=person&entity_id=${person.id}&direction=downstream`,
+      ),
+    );
+    expect(userAEdges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          dependentId: thought.id,
+          dependencyId: person.id,
+          staleReason: "upstream_updated",
+        }),
+      ]),
+    );
+    expect(userAEdges.find((edge) => edge.dependentId === thought.id)?.staleAt).not.toBeNull();
+
+    const userBEdges = await json<unknown[]>(
+      await authFetch(
+        `/api/v1/dependencies?entity_kind=person&entity_id=${person.id}&direction=downstream`,
+        {},
+        TOKEN_B,
+      ),
+    );
+    expect(userBEdges).toEqual([]);
   });
 
   it("failed cross-user remember does not leave parent thoughts or partial links", async () => {

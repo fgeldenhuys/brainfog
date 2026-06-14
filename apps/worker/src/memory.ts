@@ -127,11 +127,7 @@ async function entityExists(ctx: Ctx, kind: GraphKind, id: string) {
       .from(projects)
       .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
       .limit(1),
-    person: db
-      .select({ id: people.id })
-      .from(people)
-      .where(and(eq(people.id, id), eq(people.ownerId, ctx.user.id)))
-      .limit(1),
+    person: db.select({ id: people.id }).from(people).where(eq(people.id, id)).limit(1),
     task: db
       .select({ id: tasks.id })
       .from(tasks)
@@ -261,6 +257,24 @@ async function markDownstreamStale(
         eq(dependencyEdges.ownerId, ctx.user.id),
         eq(dependencyEdges.dependencyKind, dependencyKind),
         eq(dependencyEdges.dependencyId, dependencyId),
+        inArray(dependencyEdges.relationship, staleRelationships),
+      ),
+    );
+}
+
+async function markGlobalPersonDownstreamStale(
+  ctx: Ctx,
+  personId: string,
+  reason = "upstream_updated",
+) {
+  const timestamp = now();
+  await createDb(ctx.env.DB)
+    .update(dependencyEdges)
+    .set({ staleAt: timestamp, staleReason: reason, updatedAt: timestamp })
+    .where(
+      and(
+        eq(dependencyEdges.dependencyKind, "person"),
+        eq(dependencyEdges.dependencyId, personId),
         inArray(dependencyEdges.relationship, staleRelationships),
       ),
     );
@@ -606,24 +620,19 @@ export async function upsertPerson(
 ) {
   const db = createDb(ctx.env.DB);
   if (input.id) {
-    const existing = (
-      await db
-        .select()
-        .from(people)
-        .where(and(eq(people.id, input.id), eq(people.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
+    const existing = (await db.select().from(people).where(eq(people.id, input.id)).limit(1))[0];
     if (!existing) throw new MemoryError(404, "person not found");
     const updated = {
       ...existing,
       name: input.name,
+      source: source(ctx),
       aliases: input.aliases === undefined ? existing.aliases : input.aliases,
       contactInfo: input.contact_info === undefined ? existing.contactInfo : input.contact_info,
       notes: input.notes === undefined ? existing.notes : input.notes,
       updatedAt: now(),
     };
     await db.update(people).set(updated).where(eq(people.id, input.id));
-    await markDownstreamStale(ctx, "person", input.id);
+    await markGlobalPersonDownstreamStale(ctx, input.id);
     return updated;
   }
   const row = {
@@ -640,22 +649,14 @@ export async function upsertPerson(
 }
 
 export async function listPeople(ctx: Ctx) {
-  return createDb(ctx.env.DB)
-    .select()
-    .from(people)
-    .where(eq(people.ownerId, ctx.user.id))
-    .orderBy(people.name);
+  return createDb(ctx.env.DB).select().from(people).orderBy(people.name);
 }
 
 export async function getSelfPerson(ctx: Ctx) {
   const selfPersonId = ctx.user.selfPersonId ?? null;
   if (!selfPersonId) return null;
   const row = (
-    await createDb(ctx.env.DB)
-      .select()
-      .from(people)
-      .where(and(eq(people.id, selfPersonId), eq(people.ownerId, ctx.user.id)))
-      .limit(1)
+    await createDb(ctx.env.DB).select().from(people).where(eq(people.id, selfPersonId)).limit(1)
   )[0];
   return row ?? null;
 }
@@ -664,11 +665,7 @@ export async function setSelfPerson(ctx: Ctx, personId: string | null) {
   const db = createDb(ctx.env.DB);
   if (personId !== null) {
     const row = (
-      await db
-        .select({ id: people.id })
-        .from(people)
-        .where(and(eq(people.id, personId), eq(people.ownerId, ctx.user.id)))
-        .limit(1)
+      await db.select({ id: people.id }).from(people).where(eq(people.id, personId)).limit(1)
     )[0];
     if (!row) throw new MemoryError(404, "person not found");
   }
@@ -1703,11 +1700,7 @@ export async function labelForEntity(ctx: Ctx, kind: GraphKind, id: string): Pro
     }
     case "person": {
       const row = (
-        await db
-          .select({ v: people.name })
-          .from(people)
-          .where(and(eq(people.id, id), eq(people.ownerId, ownerId)))
-          .limit(1)
+        await db.select({ v: people.name }).from(people).where(eq(people.id, id)).limit(1)
       )[0];
       return row?.v ?? id;
     }
@@ -1833,7 +1826,7 @@ export async function browseEntities(
       return { rows, total, page, per_page: perPage };
     }
     case "people": {
-      const filters: SQL<unknown>[] = [eq(people.ownerId, ownerId)];
+      const filters: SQL<unknown>[] = [];
       if (q.q) filters.push(sql`${people.name} like ${`%${q.q}%`}`);
       const where = whereAll(filters);
       const [rows, total] = await Promise.all([
@@ -1970,13 +1963,7 @@ export async function getEntity(
       return row;
     }
     case "people": {
-      const row = (
-        await db
-          .select()
-          .from(people)
-          .where(and(eq(people.id, id), eq(people.ownerId, ownerId)))
-          .limit(1)
-      )[0];
+      const row = (await db.select().from(people).where(eq(people.id, id)).limit(1))[0];
       if (!row) throw new MemoryError(404, "person not found");
       return row;
     }
@@ -2192,7 +2179,7 @@ export async function getMetrics(ctx: Ctx, q: MetricsQuery) {
 
   const counts = {
     projects: projectId ? 1 : await db.$count(projects, eq(projects.ownerId, ownerId)),
-    people: await db.$count(people, eq(people.ownerId, ownerId)),
+    people: await db.$count(people),
     tasks: await db.$count(
       tasks,
       whereAll(

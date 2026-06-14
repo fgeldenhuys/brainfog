@@ -64,7 +64,7 @@ export const people = sqliteTable(
     notes: text("notes"),
     ...timestamps,
   },
-  (table) => [index("people_owner_name_idx").on(table.ownerId, table.name)],
+  (table) => [index("people_name_idx").on(table.name)],
 );
 
 export const tasks = sqliteTable(

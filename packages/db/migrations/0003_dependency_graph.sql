@@ -12,7 +12,7 @@ CREATE INDEX IF NOT EXISTS `dependency_edges_stale_idx` ON `dependency_edges` (`
 --> statement-breakpoint
 INSERT OR IGNORE INTO dependency_edges (id, owner_id, source, dependent_kind, dependent_id, dependency_kind, dependency_id, relationship, metadata, created_at, updated_at)
 SELECT 'bf' || substr(lower(hex(randomblob(10))), 1, 20) || 'e', t.owner_id, t.source, 'thought', tp.thought_id, 'person', tp.person_id, 'references', '{}', unixepoch(), unixepoch()
-FROM thought_people tp JOIN thoughts t ON t.id = tp.thought_id JOIN people p ON p.id = tp.person_id AND p.owner_id = t.owner_id;
+FROM thought_people tp JOIN thoughts t ON t.id = tp.thought_id JOIN people p ON p.id = tp.person_id;
 --> statement-breakpoint
 INSERT OR IGNORE INTO dependency_edges (id, owner_id, source, dependent_kind, dependent_id, dependency_kind, dependency_id, relationship, metadata, created_at, updated_at)
 SELECT 'bf' || substr(lower(hex(randomblob(10))), 1, 20) || 'e', t.owner_id, t.source, 'thought', tt.thought_id, 'task', tt.task_id, 'references', '{}', unixepoch(), unixepoch()
@@ -55,7 +55,7 @@ SELECT 'bf' || substr(lower(hex(randomblob(10))), 1, 20) || 'e', s.owner_id, s.s
 FROM time_series_points s
 WHERE s.subject_type IS NOT NULL AND s.subject_id IS NOT NULL AND (
   (s.subject_type = 'project' AND EXISTS (SELECT 1 FROM projects p WHERE p.id = s.subject_id AND p.owner_id = s.owner_id)) OR
-  (s.subject_type = 'person' AND EXISTS (SELECT 1 FROM people p WHERE p.id = s.subject_id AND p.owner_id = s.owner_id)) OR
+  (s.subject_type = 'person' AND EXISTS (SELECT 1 FROM people p WHERE p.id = s.subject_id)) OR
   (s.subject_type = 'task' AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = s.subject_id AND t.owner_id = s.owner_id)) OR
   (s.subject_type = 'fact' AND EXISTS (SELECT 1 FROM facts f WHERE f.id = s.subject_id AND f.owner_id = s.owner_id)) OR
   (s.subject_type = 'document' AND EXISTS (SELECT 1 FROM documents d WHERE d.id = s.subject_id AND d.owner_id = s.owner_id)) OR

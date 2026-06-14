@@ -31,8 +31,9 @@ import {
 
 /**
  * Streamable HTTP MCP server (ADR-003), mounted at `/mcp` behind the
- * shared bearer-token middleware. Tool handlers call the same owner-scoped
- * memory service layer as the REST API.
+ * shared bearer-token middleware. Tool handlers call the same memory service
+ * layer as the REST API: non-person memories are owner-scoped, while people
+ * are a global authenticated pool.
  */
 export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
   server = new McpServer({ name: "brainfog", version: "0.1.0" });
@@ -325,7 +326,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register("list_projects", "List projects.", {}, () => listProjects(this.memoryCtx()));
     register(
       "link",
-      "Link a thought to owned people, tasks, facts, and documents.",
+      "Link a thought to global people or owned tasks, facts, and documents.",
       { thought_id: z.string(), links: obj },
       (args) =>
         linkThought(
