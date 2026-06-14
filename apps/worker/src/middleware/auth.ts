@@ -27,7 +27,12 @@ export const authMiddleware: MiddlewareHandler<{
   const tokenHash = await hashToken(token, c.env.BRAINFOG_TOKEN_HASH_SECRET);
   const db = createDb(c.env.DB);
   const rows = await db
-    .select({ tokenId: tokens.id, userId: users.id, name: users.name })
+    .select({
+      tokenId: tokens.id,
+      userId: users.id,
+      name: users.name,
+      selfPersonId: users.selfPersonId,
+    })
     .from(tokens)
     .innerJoin(users, eq(tokens.userId, users.id))
     .where(eq(tokens.tokenHash, tokenHash))
@@ -46,6 +51,6 @@ export const authMiddleware: MiddlewareHandler<{
       .then(() => undefined),
   );
 
-  c.set("user", { id: row.userId, name: row.name });
+  c.set("user", { id: row.userId, name: row.name, selfPersonId: row.selfPersonId });
   await next();
 };

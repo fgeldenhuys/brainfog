@@ -160,6 +160,31 @@ describe("memory model REST service", () => {
         }),
       }),
     );
+    const self = await json<{ self_person_id: string; self_person: { id: string } }>(
+      await authFetch("/api/v1/whoami", {
+        method: "PATCH",
+        body: JSON.stringify({ self_person_id: person.id }),
+      }),
+    );
+    expect(self.self_person_id).toBe(person.id);
+    expect(self.self_person.id).toBe(person.id);
+
+    const whoami = await json<{ self_person_id: string; self_person: { id: string } }>(
+      await authFetch("/api/v1/whoami"),
+    );
+    expect(whoami.self_person_id).toBe(person.id);
+    expect(whoami.self_person.id).toBe(person.id);
+
+    const crossUserSelf = await authFetch(
+      "/api/v1/whoami",
+      {
+        method: "PATCH",
+        body: JSON.stringify({ self_person_id: person.id }),
+      },
+      TOKEN_B,
+    );
+    expect(crossUserSelf.status).toBe(404);
+
     const task = await json<{ id: string }>(
       await authFetch("/api/v1/tasks", {
         method: "POST",

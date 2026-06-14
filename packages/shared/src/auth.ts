@@ -10,6 +10,7 @@ const TOKEN_BYTES = 32;
 export interface AuthenticatedUser {
   id: string;
   name: string;
+  selfPersonId: string | null;
 }
 
 export async function hashToken(token: string, secret: string): Promise<string> {

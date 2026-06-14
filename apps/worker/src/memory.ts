@@ -16,11 +16,12 @@ import {
   thoughts,
   thoughtTasks,
   timeSeriesPoints,
+  users,
 } from "@brainfog/db";
 import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
 import type { Env } from "./env";
 
-export type MemoryUser = { id: string; name: string };
+export type MemoryUser = { id: string; name: string; selfPersonId?: string | null };
 type Ctx = { env: Env; user: MemoryUser; source?: string };
 
 const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -211,6 +212,36 @@ export async function listPeople(ctx: Ctx) {
     .from(people)
     .where(eq(people.ownerId, ctx.user.id))
     .orderBy(people.name);
+}
+
+export async function getSelfPerson(ctx: Ctx) {
+  const selfPersonId = ctx.user.selfPersonId ?? null;
+  if (!selfPersonId) return null;
+  const row = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(people)
+      .where(and(eq(people.id, selfPersonId), eq(people.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  return row ?? null;
+}
+
+export async function setSelfPerson(ctx: Ctx, personId: string | null) {
+  const db = createDb(ctx.env.DB);
+  if (personId !== null) {
+    const row = (
+      await db
+        .select({ id: people.id })
+        .from(people)
+        .where(and(eq(people.id, personId), eq(people.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    if (!row) throw new MemoryError(404, "person not found");
+  }
+  await db.update(users).set({ selfPersonId: personId }).where(eq(users.id, ctx.user.id));
+  ctx.user.selfPersonId = personId;
+  return { self_person_id: personId, self_person: await getSelfPerson(ctx) };
 }
 
 function validateRecurrence(recurrence: unknown) {

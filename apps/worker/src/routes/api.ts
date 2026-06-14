@@ -10,6 +10,7 @@ import {
   deleteThought,
   getChunksForDocument,
   getDocumentContent,
+  getSelfPerson,
   linkThought,
   listDocuments,
   listFacts,
@@ -23,6 +24,7 @@ import {
   recordFact,
   recordTimeSeriesPoint,
   remember,
+  setSelfPerson,
   updateDocument,
   updateFact,
   updateTask,
@@ -39,9 +41,14 @@ apiRoutes.get("/health", (c) => c.json({ status: "ok" }));
 
 apiRoutes.use("*", authMiddleware);
 
-apiRoutes.get("/whoami", (c) => {
+apiRoutes.get("/whoami", async (c) => {
   const user = c.get("user");
-  return c.json({ id: user.id, name: user.name });
+  return c.json({
+    id: user.id,
+    name: user.name,
+    self_person_id: user.selfPersonId,
+    self_person: await getSelfPerson(ctx(c)),
+  });
 });
 
 type ApiContext = Context<{ Bindings: Env; Variables: AuthVariables }>;
@@ -74,6 +81,16 @@ const param = (c: ApiContext, name: string) => {
   if (!value) throw new MemoryError(400, `missing ${name}`);
   return value;
 };
+
+apiRoutes.patch(
+  "/whoami",
+  route(async (c) => {
+    const payload = await body(c);
+    const personId = payload.self_person_id === null ? null : String(payload.self_person_id ?? "");
+    if (personId !== null && !personId) throw new MemoryError(400, "missing self_person_id");
+    return c.json(await setSelfPerson(ctx(c), personId));
+  }),
+);
 
 apiRoutes.get(
   "/projects",

@@ -17,6 +17,7 @@ import {
   recordFact,
   recordTimeSeriesPoint,
   remember,
+  setSelfPerson,
   updateDocument,
   updateFact,
   updateTask,
@@ -276,6 +277,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       (args) => upsertPerson(this.memoryCtx(), args as Parameters<typeof upsertPerson>[1]),
     );
     register("list_people", "List people.", {}, () => listPeople(this.memoryCtx()));
+    register(
+      "set_self_person",
+      "Set or clear the current user's self person link.",
+      { self_person_id: z.string().nullable() },
+      (args) => setSelfPerson(this.memoryCtx(), args.self_person_id as string | null),
+    );
     register(
       "create_project",
       "Create a project.",

@@ -11,11 +11,16 @@ import {
   unique,
 } from "drizzle-orm/sqlite-core";
 
-export const users = sqliteTable("users", {
-  id: text("id").primaryKey(),
-  name: text("name").notNull(),
-  createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
-});
+export const users = sqliteTable(
+  "users",
+  {
+    id: text("id").primaryKey(),
+    name: text("name").notNull(),
+    selfPersonId: text("self_person_id"),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  },
+  (table) => [index("users_self_person_idx").on(table.selfPersonId)],
+);
 
 export const tokens = sqliteTable("tokens", {
   id: text("id").primaryKey(),

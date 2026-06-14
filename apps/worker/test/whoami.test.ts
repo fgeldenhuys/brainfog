@@ -35,6 +35,11 @@ describe("GET /api/v1/whoami", () => {
       headers: { Authorization: `Bearer ${VALID_TOKEN}` },
     });
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ id: "user-1", name: "Ada Lovelace" });
+    expect(await response.json()).toEqual({
+      id: "user-1",
+      name: "Ada Lovelace",
+      self_person_id: null,
+      self_person: null,
+    });
   });
 });
