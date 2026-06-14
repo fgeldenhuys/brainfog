@@ -12,7 +12,6 @@ import {
   deleteThought,
   getChunksForDocument,
   getDocumentContent,
-  getSelfPerson,
   linkThought,
   listDependencies,
   listDocuments,
@@ -34,6 +33,7 @@ import {
   updateFact,
   updateTask,
   upsertPerson,
+  whoami,
 } from "../memory";
 import { type AuthVariables, authMiddleware } from "../middleware/auth";
 
@@ -46,15 +46,7 @@ apiRoutes.get("/health", (c) => c.json({ status: "ok" }));
 
 apiRoutes.use("*", authMiddleware);
 
-apiRoutes.get("/whoami", async (c) => {
-  const user = c.get("user");
-  return c.json({
-    id: user.id,
-    name: user.name,
-    self_person_id: user.selfPersonId,
-    self_person: await getSelfPerson(ctx(c)),
-  });
-});
+apiRoutes.get("/whoami", async (c) => c.json(await whoami(ctx(c))));
 
 type ApiContext = Context<{ Bindings: Env; Variables: AuthVariables }>;
 

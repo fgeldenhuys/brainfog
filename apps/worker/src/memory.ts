@@ -661,6 +661,15 @@ export async function getSelfPerson(ctx: Ctx) {
   return row ?? null;
 }
 
+export async function whoami(ctx: Ctx) {
+  return {
+    id: ctx.user.id,
+    name: ctx.user.name,
+    self_person_id: ctx.user.selfPersonId ?? null,
+    self_person: await getSelfPerson(ctx),
+  };
+}
+
 export async function setSelfPerson(ctx: Ctx, personId: string | null) {
   const db = createDb(ctx.env.DB);
   if (personId !== null) {

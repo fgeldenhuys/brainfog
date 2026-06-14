@@ -27,6 +27,7 @@ import {
   updateFact,
   updateTask,
   upsertPerson,
+  whoami,
 } from "../memory";
 
 /**
@@ -311,6 +312,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       (args) => upsertPerson(this.memoryCtx(), args as Parameters<typeof upsertPerson>[1]),
     );
     register("list_people", "List people.", {}, () => listPeople(this.memoryCtx()));
+    register(
+      "whoami",
+      "Get the current user's account record and linked self person record.",
+      {},
+      () => whoami(this.memoryCtx()),
+    );
     register(
       "set_self_person",
       "Set or clear the current user's self person link.",

@@ -862,6 +862,20 @@ describe("memory model REST service", () => {
     expect(recalled.some((r) => r.row.id === thought.id)).toBe(true);
   });
 
+  it("whoami MCP tool mirrors the REST /api/v1/whoami service layer", async () => {
+    const restWhoami = await json<{
+      id: string;
+      name: string;
+      self_person_id: string | null;
+      self_person: { id: string } | null;
+    }>(await authFetch("/api/v1/whoami"));
+
+    const mcpWhoami = await callMcpTool<typeof restWhoami>("whoami", {});
+    expect(mcpWhoami).toEqual(restWhoami);
+    expect(mcpWhoami.id).toBe("user-memory-a");
+    expect(mcpWhoami.name).toBe("Memory A");
+  });
+
   it("MCP exposes all memory-model tools", async () => {
     const session = await mcpSession();
     const response = await mcpRequest(
@@ -887,6 +901,7 @@ describe("memory model REST service", () => {
         "list_time_series_points",
         "upsert_person",
         "list_people",
+        "whoami",
         "create_project",
         "list_projects",
         "link",
@@ -1890,6 +1905,7 @@ describe("memory model REST service", () => {
         "list_time_series_points",
         "upsert_person",
         "list_people",
+        "whoami",
         "create_project",
         "list_projects",
         "link",
