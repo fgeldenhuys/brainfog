@@ -61,7 +61,10 @@ export function qs(params: Record<string, string | number | undefined | null>): 
 }
 
 const navLink = (href: string, label: string, currentPath?: string) => {
-  const isActive = currentPath === href || currentPath?.startsWith(href + "/");
+  const isActive =
+    href === "/app"
+      ? currentPath === href
+      : currentPath === href || currentPath?.startsWith(`${href}/`);
   return (
     <a
       href={href}
