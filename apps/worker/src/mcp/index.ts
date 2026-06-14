@@ -4,15 +4,20 @@ import { z } from "zod";
 import type { Env } from "../env";
 import {
   addDocument,
+  createDependency,
   createProject,
   createTask,
+  deleteDependency,
   linkThought,
+  listDependencies,
   listPeople,
   listProjects,
+  listStale,
   listTasks,
   listTimeSeriesPoints,
   MemoryError,
   type MemoryUser,
+  markStale,
   recall,
   recordFact,
   recordTimeSeriesPoint,
@@ -202,14 +207,21 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         content: z.string(),
         project_id: z.string().optional(),
         mime_type: z.string().optional(),
+        derived_from: obj,
       },
       (args) => addDocument(this.memoryCtx(), args as Parameters<typeof addDocument>[1]),
     );
     register(
       "update_document",
       "Replace a document's content and regenerate chunks.",
-      { id: z.string(), content: z.string() },
-      (args) => updateDocument(this.memoryCtx(), String(args.id), String(args.content)),
+      { id: z.string(), content: z.string(), derived_from: obj },
+      (args) =>
+        updateDocument(
+          this.memoryCtx(),
+          String(args.id),
+          String(args.content),
+          args.derived_from as Parameters<typeof updateDocument>[3],
+        ),
     );
     register(
       "recall",
@@ -321,6 +333,60 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           String(args.thought_id),
           args.links as Parameters<typeof linkThought>[2],
         ),
+    );
+    const endpoint = z.object({ kind: z.string(), id: z.string() });
+    register(
+      "create_dependency",
+      "Create an owner-scoped dependency graph edge.",
+      {
+        dependent: endpoint,
+        dependency: endpoint,
+        relationship: z.enum([
+          "references",
+          "derived_from",
+          "summarizes",
+          "supersedes",
+          "observes_subject",
+          "mentions",
+          "related_to",
+        ]),
+        metadata: obj,
+      },
+      (args) => createDependency(this.memoryCtx(), args as Parameters<typeof createDependency>[1]),
+    );
+    register(
+      "delete_dependency",
+      "Delete one owner-scoped dependency graph edge.",
+      { id: z.string() },
+      (args) => deleteDependency(this.memoryCtx(), String(args.id)),
+    );
+    register(
+      "list_dependencies",
+      "List upstream and/or downstream dependency graph edges for one object.",
+      {
+        entity_kind: z.string(),
+        entity_id: z.string(),
+        direction: z.enum(["upstream", "downstream", "both"]).optional(),
+        relationship: z.string().optional(),
+      },
+      (args) => listDependencies(this.memoryCtx(), args as Parameters<typeof listDependencies>[1]),
+    );
+    register(
+      "mark_stale",
+      "Mark downstream dependency graph edges stale for an upstream object.",
+      {
+        entity_kind: z.string(),
+        entity_id: z.string(),
+        reason: z.string().optional(),
+        stale_since: z.number().optional(),
+      },
+      (args) => markStale(this.memoryCtx(), args as Parameters<typeof markStale>[1]),
+    );
+    register(
+      "list_stale",
+      "List stale dependency graph edges.",
+      { kind: z.string().optional(), project_id: z.string().optional() },
+      (args) => listStale(this.memoryCtx(), args),
     );
   }
 

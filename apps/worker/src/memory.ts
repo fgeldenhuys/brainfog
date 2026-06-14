@@ -1,24 +1,17 @@
 import {
   createDb,
+  dependencyEdges,
   documentChunks,
   documents,
-  factSourceDocumentChunks,
-  factSourceDocuments,
-  factSourceFacts,
-  factSourceThoughts,
   facts,
   people,
   projects,
   tasks,
-  thoughtDocuments,
-  thoughtFacts,
-  thoughtPeople,
   thoughts,
-  thoughtTasks,
   timeSeriesPoints,
   users,
 } from "@brainfog/db";
-import { and, desc, eq, gte, lte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, lte, or, sql } from "drizzle-orm";
 import type { Env } from "./env";
 
 export type MemoryUser = { id: string; name: string; selfPersonId?: string | null };
@@ -35,7 +28,31 @@ const suffix = {
   document: "d",
   documentChunk: "c",
   thought: "t",
+  dependencyEdge: "e",
 } as const;
+
+const graphKinds = [
+  "project",
+  "person",
+  "task",
+  "fact",
+  "time_series_point",
+  "document",
+  "document_chunk",
+  "thought",
+] as const;
+const relationships = [
+  "references",
+  "derived_from",
+  "summarizes",
+  "supersedes",
+  "observes_subject",
+  "mentions",
+  "related_to",
+] as const;
+const staleRelationships = ["derived_from", "summarizes", "supersedes", "observes_subject"];
+type GraphKind = (typeof graphKinds)[number];
+type Relationship = (typeof relationships)[number];
 
 export class MemoryError extends Error {
   constructor(
@@ -53,7 +70,7 @@ export function createId(kind: keyof typeof suffix) {
 }
 
 export const isBrainfogId = (value: string, typeSuffix?: string) =>
-  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdctun]"}$`).test(value);
+  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteun]"}$`).test(value);
 
 function now() {
   return new Date();
@@ -80,6 +97,426 @@ async function ensureProject(ctx: Ctx, id?: string | null) {
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "project not found");
+}
+
+function asGraphKind(kind: unknown): GraphKind {
+  if (typeof kind === "string" && (graphKinds as readonly string[]).includes(kind))
+    return kind as GraphKind;
+  throw new MemoryError(400, "invalid entity kind");
+}
+
+function asRelationship(value: unknown): Relationship {
+  if (typeof value === "string" && (relationships as readonly string[]).includes(value))
+    return value as Relationship;
+  throw new MemoryError(400, "invalid relationship");
+}
+
+async function entityExists(ctx: Ctx, kind: GraphKind, id: string) {
+  const db = createDb(ctx.env.DB);
+  const checks: Record<GraphKind, Promise<unknown[]>> = {
+    project: db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
+      .limit(1),
+    person: db
+      .select({ id: people.id })
+      .from(people)
+      .where(and(eq(people.id, id), eq(people.ownerId, ctx.user.id)))
+      .limit(1),
+    task: db
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
+      .limit(1),
+    fact: db
+      .select({ id: facts.id })
+      .from(facts)
+      .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
+      .limit(1),
+    time_series_point: db
+      .select({ id: timeSeriesPoints.id })
+      .from(timeSeriesPoints)
+      .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ctx.user.id)))
+      .limit(1),
+    document: db
+      .select({ id: documents.id })
+      .from(documents)
+      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+      .limit(1),
+    document_chunk: db
+      .select({ id: documentChunks.id })
+      .from(documentChunks)
+      .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+      .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
+      .limit(1),
+    thought: db
+      .select({ id: thoughts.id })
+      .from(thoughts)
+      .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
+      .limit(1),
+  };
+  return Boolean((await checks[kind])[0]);
+}
+
+async function ensureEntity(ctx: Ctx, kind: GraphKind, id: string, message?: string) {
+  if (!(await entityExists(ctx, kind, id)))
+    throw new MemoryError(404, message ?? "entity not found");
+}
+
+export async function createDependency(
+  ctx: Ctx,
+  input: {
+    dependent: { kind: string; id: string };
+    dependency: { kind: string; id: string };
+    relationship: string;
+    metadata?: Record<string, unknown>;
+  },
+) {
+  const dependentKind = asGraphKind(input.dependent?.kind);
+  const dependencyKind = asGraphKind(input.dependency?.kind);
+  const relationship = asRelationship(input.relationship);
+  const dependentId = String(input.dependent?.id ?? "");
+  const dependencyId = String(input.dependency?.id ?? "");
+  if (!dependentId || !dependencyId) throw new MemoryError(400, "missing dependency endpoint");
+  await ensureEntity(ctx, dependentKind, dependentId, "dependent not found");
+  await ensureEntity(ctx, dependencyKind, dependencyId, "dependency not found");
+  if (dependentKind === dependencyKind && dependentId === dependencyId)
+    throw new MemoryError(400, "dependency cannot point to itself");
+  const row = {
+    id: createId("dependencyEdge"),
+    ownerId: ctx.user.id,
+    source: source(ctx),
+    dependentKind,
+    dependentId,
+    dependencyKind,
+    dependencyId,
+    relationship,
+    metadata: input.metadata ?? {},
+  };
+  await createDb(ctx.env.DB).insert(dependencyEdges).values(row).onConflictDoNothing();
+  return (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependentKind, dependentKind),
+          eq(dependencyEdges.dependentId, dependentId),
+          eq(dependencyEdges.dependencyKind, dependencyKind),
+          eq(dependencyEdges.dependencyId, dependencyId),
+          eq(dependencyEdges.relationship, relationship),
+        ),
+      )
+      .limit(1)
+  )[0];
+}
+
+async function replaceDependencies(
+  ctx: Ctx,
+  dependentKind: GraphKind,
+  dependentId: string,
+  relationship: Relationship,
+  dependencies: { kind: GraphKind; id: string }[],
+) {
+  const db = createDb(ctx.env.DB);
+  await db
+    .delete(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependentKind, dependentKind),
+        eq(dependencyEdges.dependentId, dependentId),
+        eq(dependencyEdges.relationship, relationship),
+      ),
+    );
+  for (const dependency of dependencies)
+    await createDependency(ctx, {
+      dependent: { kind: dependentKind, id: dependentId },
+      dependency,
+      relationship,
+    });
+}
+
+async function markDownstreamStale(
+  ctx: Ctx,
+  dependencyKind: GraphKind,
+  dependencyId: string,
+  reason = "upstream_updated",
+) {
+  await createDb(ctx.env.DB)
+    .update(dependencyEdges)
+    .set({ staleAt: now(), staleReason: reason, updatedAt: now() })
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependencyKind, dependencyKind),
+        eq(dependencyEdges.dependencyId, dependencyId),
+        inArray(dependencyEdges.relationship, staleRelationships),
+      ),
+    );
+}
+
+async function cleanDocumentChunkGraphEdges(
+  ctx: Ctx,
+  documentId: string,
+  chunkIds: string[],
+  options: { retargetDependencyEdgesToDocument: boolean; staleReason: string },
+) {
+  if (chunkIds.length === 0) return;
+  const db = createDb(ctx.env.DB);
+  const timestamp = now();
+
+  if (options.retargetDependencyEdgesToDocument) {
+    const dependencyEdgesFromChunks = await db
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependencyKind, "document_chunk"),
+          inArray(dependencyEdges.dependencyId, chunkIds),
+        ),
+      );
+
+    for (const edge of dependencyEdgesFromChunks) {
+      if (!(staleRelationships as readonly string[]).includes(edge.relationship)) {
+        await db.delete(dependencyEdges).where(eq(dependencyEdges.id, edge.id));
+        continue;
+      }
+
+      const existingDocumentEdge = (
+        await db
+          .select({ id: dependencyEdges.id })
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.ownerId, ctx.user.id),
+              eq(dependencyEdges.dependentKind, edge.dependentKind),
+              eq(dependencyEdges.dependentId, edge.dependentId),
+              eq(dependencyEdges.dependencyKind, "document"),
+              eq(dependencyEdges.dependencyId, documentId),
+              eq(dependencyEdges.relationship, edge.relationship),
+            ),
+          )
+          .limit(1)
+      )[0];
+
+      if (existingDocumentEdge) {
+        await db
+          .update(dependencyEdges)
+          .set({ staleAt: timestamp, staleReason: options.staleReason, updatedAt: timestamp })
+          .where(eq(dependencyEdges.id, existingDocumentEdge.id));
+        await db.delete(dependencyEdges).where(eq(dependencyEdges.id, edge.id));
+      } else {
+        await db
+          .update(dependencyEdges)
+          .set({
+            dependencyKind: "document",
+            dependencyId: documentId,
+            staleAt: timestamp,
+            staleReason: options.staleReason,
+            updatedAt: timestamp,
+          })
+          .where(eq(dependencyEdges.id, edge.id));
+      }
+    }
+  } else {
+    await db
+      .update(dependencyEdges)
+      .set({ staleAt: timestamp, staleReason: options.staleReason, updatedAt: timestamp })
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependencyKind, "document_chunk"),
+          inArray(dependencyEdges.dependencyId, chunkIds),
+          inArray(dependencyEdges.relationship, staleRelationships),
+        ),
+      );
+  }
+
+  await db
+    .delete(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependentKind, "document_chunk"),
+        inArray(dependencyEdges.dependentId, chunkIds),
+      ),
+    );
+
+  await db
+    .delete(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependencyKind, "document_chunk"),
+        inArray(dependencyEdges.dependencyId, chunkIds),
+      ),
+    );
+}
+
+export async function deleteDependency(ctx: Ctx, id: string) {
+  const db = createDb(ctx.env.DB);
+  const row = (
+    await db
+      .select({ id: dependencyEdges.id })
+      .from(dependencyEdges)
+      .where(and(eq(dependencyEdges.id, id), eq(dependencyEdges.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  if (!row) throw new MemoryError(404, "dependency not found");
+  await db.delete(dependencyEdges).where(eq(dependencyEdges.id, id));
+  return { ok: true };
+}
+
+export async function listDependencies(
+  ctx: Ctx,
+  input: { entity_kind: string; entity_id: string; direction?: string; relationship?: string },
+) {
+  const entityKind = asGraphKind(input.entity_kind);
+  const direction = input.direction ?? "both";
+  if (!["upstream", "downstream", "both"].includes(direction))
+    throw new MemoryError(400, "invalid direction");
+  if (input.relationship) asRelationship(input.relationship);
+  await ensureEntity(ctx, entityKind, input.entity_id, "entity not found");
+  const filters = [eq(dependencyEdges.ownerId, ctx.user.id)];
+  if (direction === "upstream") {
+    filters.push(eq(dependencyEdges.dependentKind, entityKind));
+    filters.push(eq(dependencyEdges.dependentId, input.entity_id));
+  } else if (direction === "downstream") {
+    filters.push(eq(dependencyEdges.dependencyKind, entityKind));
+    filters.push(eq(dependencyEdges.dependencyId, input.entity_id));
+  } else {
+    const eitherDirection = or(
+      and(
+        eq(dependencyEdges.dependentKind, entityKind),
+        eq(dependencyEdges.dependentId, input.entity_id),
+      ),
+      and(
+        eq(dependencyEdges.dependencyKind, entityKind),
+        eq(dependencyEdges.dependencyId, input.entity_id),
+      ),
+    );
+    if (!eitherDirection) throw new MemoryError(400, "invalid dependency query");
+    filters.push(eitherDirection);
+  }
+  if (input.relationship) filters.push(eq(dependencyEdges.relationship, input.relationship));
+  return createDb(ctx.env.DB)
+    .select()
+    .from(dependencyEdges)
+    .where(and(...filters))
+    .orderBy(desc(dependencyEdges.createdAt));
+}
+
+export async function markStale(
+  ctx: Ctx,
+  input: { entity_kind: string; entity_id: string; reason?: string; stale_since?: number },
+) {
+  const entityKind = asGraphKind(input.entity_kind);
+  await ensureEntity(ctx, entityKind, input.entity_id, "entity not found");
+  const staleAt = asDate(input.stale_since) ?? now();
+  await createDb(ctx.env.DB)
+    .update(dependencyEdges)
+    .set({ staleAt, staleReason: input.reason ?? "explicit_mark_stale", updatedAt: now() })
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependencyKind, entityKind),
+        eq(dependencyEdges.dependencyId, input.entity_id),
+      ),
+    );
+  return listStale(ctx, {});
+}
+
+export async function listStale(ctx: Ctx, input: { kind?: string; project_id?: string }) {
+  if (input.kind) asGraphKind(input.kind);
+  if (input.project_id) await ensureProject(ctx, input.project_id);
+  const filters = [eq(dependencyEdges.ownerId, ctx.user.id), isNotNull(dependencyEdges.staleAt)];
+  if (input.kind) filters.push(eq(dependencyEdges.dependentKind, input.kind));
+  const rows = await createDb(ctx.env.DB)
+    .select()
+    .from(dependencyEdges)
+    .where(and(...filters))
+    .orderBy(desc(dependencyEdges.staleAt));
+  if (!input.project_id) return rows;
+  const out = [];
+  for (const row of rows) {
+    if (
+      (await projectIdForEntity(ctx, row.dependentKind as GraphKind, row.dependentId)) ===
+      input.project_id
+    )
+      out.push(row);
+  }
+  return out;
+}
+
+async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
+  const db = createDb(ctx.env.DB);
+  if (kind === "project") return id;
+  if (kind === "task") {
+    const row = (
+      await db
+        .select({ projectId: tasks.projectId })
+        .from(tasks)
+        .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  if (kind === "fact") {
+    const row = (
+      await db
+        .select({ projectId: facts.projectId })
+        .from(facts)
+        .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  if (kind === "document") {
+    const row = (
+      await db
+        .select({ projectId: documents.projectId })
+        .from(documents)
+        .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  if (kind === "document_chunk") {
+    const row = (
+      await db
+        .select({ projectId: documents.projectId })
+        .from(documentChunks)
+        .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+        .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  if (kind === "thought") {
+    const row = (
+      await db
+        .select({ projectId: thoughts.projectId })
+        .from(thoughts)
+        .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  if (kind === "time_series_point") {
+    const row = (
+      await db
+        .select({ projectId: timeSeriesPoints.projectId })
+        .from(timeSeriesPoints)
+        .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    return row?.projectId ?? null;
+  }
+  return null;
 }
 
 async function embed(ctx: Ctx, text: string): Promise<number[]> {
@@ -190,6 +627,7 @@ export async function upsertPerson(
       updatedAt: now(),
     };
     await db.update(people).set(updated).where(eq(people.id, input.id));
+    await markDownstreamStale(ctx, "person", input.id);
     return updated;
   }
   const row = {
@@ -312,6 +750,7 @@ export async function updateTask(ctx: Ctx, id: string, input: Record<string, unk
       updatedAt: now(),
     })
     .where(eq(tasks.id, id));
+  await markDownstreamStale(ctx, "task", id);
   return (await db.select().from(tasks).where(eq(tasks.id, id)))[0];
 }
 
@@ -337,104 +776,48 @@ async function applyThoughtLinks(
   },
 ) {
   if (!links) return;
-  const db = createDb(ctx.env.DB);
   for (const id of links.people_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: people.id })
-          .from(people)
-          .where(and(eq(people.id, id), eq(people.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "person link not found");
-    await db.insert(thoughtPeople).values({ thoughtId, personId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "person", id, "person link not found");
+    await createDependency(ctx, {
+      dependent: { kind: "thought", id: thoughtId },
+      dependency: { kind: "person", id },
+      relationship: "references",
+    });
   }
   for (const id of links.task_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: tasks.id })
-          .from(tasks)
-          .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "task link not found");
-    await db.insert(thoughtTasks).values({ thoughtId, taskId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "task", id, "task link not found");
+    await createDependency(ctx, {
+      dependent: { kind: "thought", id: thoughtId },
+      dependency: { kind: "task", id },
+      relationship: "references",
+    });
   }
   for (const id of links.fact_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: facts.id })
-          .from(facts)
-          .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "fact link not found");
-    await db.insert(thoughtFacts).values({ thoughtId, factId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "fact", id, "fact link not found");
+    await createDependency(ctx, {
+      dependent: { kind: "thought", id: thoughtId },
+      dependency: { kind: "fact", id },
+      relationship: "references",
+    });
   }
   for (const id of links.document_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: documents.id })
-          .from(documents)
-          .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "document link not found");
-    await db.insert(thoughtDocuments).values({ thoughtId, documentId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "document", id, "document link not found");
+    await createDependency(ctx, {
+      dependent: { kind: "thought", id: thoughtId },
+      dependency: { kind: "document", id },
+      relationship: "references",
+    });
   }
 }
 
 async function validateThoughtLinks(ctx: Ctx, links?: Parameters<typeof applyThoughtLinks>[2]) {
   if (!links) return;
-  const db = createDb(ctx.env.DB);
-  for (const id of links.people_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: people.id })
-        .from(people)
-        .where(and(eq(people.id, id), eq(people.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "person link not found");
-  }
-  for (const id of links.task_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: tasks.id })
-        .from(tasks)
-        .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "task link not found");
-  }
-  for (const id of links.fact_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: facts.id })
-        .from(facts)
-        .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "fact link not found");
-  }
-  for (const id of links.document_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: documents.id })
-        .from(documents)
-        .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "document link not found");
-  }
+  for (const id of links.people_ids ?? [])
+    await ensureEntity(ctx, "person", id, "person link not found");
+  for (const id of links.task_ids ?? []) await ensureEntity(ctx, "task", id, "task link not found");
+  for (const id of links.fact_ids ?? []) await ensureEntity(ctx, "fact", id, "fact link not found");
+  for (const id of links.document_ids ?? [])
+    await ensureEntity(ctx, "document", id, "document link not found");
 }
 
 export async function remember(
@@ -496,61 +879,38 @@ async function applyFactDerivations(
   },
 ) {
   if (!derived) return;
-  const db = createDb(ctx.env.DB);
   for (const id of derived.thought_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: thoughts.id })
-          .from(thoughts)
-          .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "source thought not found");
-    await db.insert(factSourceThoughts).values({ factId, thoughtId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "thought", id, "source thought not found");
+    await createDependency(ctx, {
+      dependent: { kind: "fact", id: factId },
+      dependency: { kind: "thought", id },
+      relationship: "derived_from",
+    });
   }
   for (const id of derived.fact_ids ?? []) {
     if (id === factId) throw new MemoryError(400, "fact cannot derive from itself");
-    if (
-      !(
-        await db
-          .select({ id: facts.id })
-          .from(facts)
-          .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "source fact not found");
-    await db.insert(factSourceFacts).values({ factId, sourceFactId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "fact", id, "source fact not found");
+    await createDependency(ctx, {
+      dependent: { kind: "fact", id: factId },
+      dependency: { kind: "fact", id },
+      relationship: "derived_from",
+    });
   }
   for (const id of derived.document_ids ?? []) {
-    if (
-      !(
-        await db
-          .select({ id: documents.id })
-          .from(documents)
-          .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-          .limit(1)
-      )[0]
-    )
-      throw new MemoryError(404, "source document not found");
-    await db.insert(factSourceDocuments).values({ factId, documentId: id }).onConflictDoNothing();
+    await ensureEntity(ctx, "document", id, "source document not found");
+    await createDependency(ctx, {
+      dependent: { kind: "fact", id: factId },
+      dependency: { kind: "document", id },
+      relationship: "derived_from",
+    });
   }
   for (const id of derived.document_chunk_ids ?? []) {
-    const ok = (
-      await db
-        .select({ id: documentChunks.id })
-        .from(documentChunks)
-        .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-        .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!ok) throw new MemoryError(404, "source document chunk not found");
-    await db
-      .insert(factSourceDocumentChunks)
-      .values({ factId, documentChunkId: id })
-      .onConflictDoNothing();
+    await ensureEntity(ctx, "document_chunk", id, "source document chunk not found");
+    await createDependency(ctx, {
+      dependent: { kind: "fact", id: factId },
+      dependency: { kind: "document_chunk", id },
+      relationship: "derived_from",
+    });
   }
 }
 
@@ -560,49 +920,55 @@ async function validateFactDerivations(
   derived?: Parameters<typeof applyFactDerivations>[2],
 ) {
   if (!derived) return;
-  const db = createDb(ctx.env.DB);
-  for (const id of derived.thought_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: thoughts.id })
-        .from(thoughts)
-        .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "source thought not found");
-  }
+  for (const id of derived.thought_ids ?? [])
+    await ensureEntity(ctx, "thought", id, "source thought not found");
   for (const id of derived.fact_ids ?? []) {
     if (id === factId) throw new MemoryError(400, "fact cannot derive from itself");
-    const row = (
-      await db
-        .select({ id: facts.id })
-        .from(facts)
-        .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "source fact not found");
+    await ensureEntity(ctx, "fact", id, "source fact not found");
   }
-  for (const id of derived.document_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: documents.id })
-        .from(documents)
-        .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "source document not found");
-  }
-  for (const id of derived.document_chunk_ids ?? []) {
-    const row = (
-      await db
-        .select({ id: documentChunks.id })
-        .from(documentChunks)
-        .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-        .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!row) throw new MemoryError(404, "source document chunk not found");
-  }
+  for (const id of derived.document_ids ?? [])
+    await ensureEntity(ctx, "document", id, "source document not found");
+  for (const id of derived.document_chunk_ids ?? [])
+    await ensureEntity(ctx, "document_chunk", id, "source document chunk not found");
+}
+
+async function factWithSupersession(ctx: Ctx, fact: typeof facts.$inferSelect) {
+  const db = createDb(ctx.env.DB);
+  const supersedes = (
+    await db
+      .select({ id: dependencyEdges.dependencyId })
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependentKind, "fact"),
+          eq(dependencyEdges.dependentId, fact.id),
+          eq(dependencyEdges.dependencyKind, "fact"),
+          eq(dependencyEdges.relationship, "supersedes"),
+        ),
+      )
+      .limit(1)
+  )[0];
+  const supersededBy = (
+    await db
+      .select({ id: dependencyEdges.dependentId })
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependentKind, "fact"),
+          eq(dependencyEdges.dependencyKind, "fact"),
+          eq(dependencyEdges.dependencyId, fact.id),
+          eq(dependencyEdges.relationship, "supersedes"),
+        ),
+      )
+      .limit(1)
+  )[0];
+  return {
+    ...fact,
+    supersedesFactId: supersedes?.id ?? null,
+    supersededByFactId: supersededBy?.id ?? null,
+  };
 }
 
 export async function recordFact(
@@ -640,24 +1006,31 @@ export async function recordFact(
     citations: input.citations ?? [],
     confidence: input.confidence ?? 0.5,
     status: "current",
-    supersedesFactId: input.supersedes_fact_id ?? null,
-    supersededByFactId: null,
     metadata: { topics: input.topics ?? [] },
   };
-  if (row.supersedesFactId === row.id) throw new MemoryError(400, "fact cannot supersede itself");
+  if (input.supersedes_fact_id === row.id)
+    throw new MemoryError(400, "fact cannot supersede itself");
   await db.insert(facts).values(row);
-  if (row.supersedesFactId)
+  if (input.supersedes_fact_id) {
+    await createDependency(ctx, {
+      dependent: { kind: "fact", id: row.id },
+      dependency: { kind: "fact", id: input.supersedes_fact_id },
+      relationship: "supersedes",
+    });
     await db
       .update(facts)
-      .set({ status: "superseded", supersededByFactId: row.id, updatedAt: now() })
-      .where(eq(facts.id, row.supersedesFactId));
+      .set({ status: "superseded", updatedAt: now() })
+      .where(eq(facts.id, input.supersedes_fact_id));
+  }
   await applyFactDerivations(ctx, row.id, input.derived_from);
   await upsertVector(ctx, row.id, await embed(ctx, input.statement), {
     kind: "fact",
     owner_id: ctx.user.id,
     ...(input.project_id ? { project_id: input.project_id } : {}),
   });
-  return row;
+  const created = (await db.select().from(facts).where(eq(facts.id, row.id)))[0];
+  if (!created) throw new MemoryError(500, "fact insert failed");
+  return factWithSupersession(ctx, created);
 }
 
 export async function updateFact(ctx: Ctx, id: string, input: Record<string, unknown>) {
@@ -672,30 +1045,25 @@ export async function updateFact(ctx: Ctx, id: string, input: Record<string, unk
   if (!row) throw new MemoryError(404, "fact not found");
   if (input.supersedes_fact_id === id || input.superseded_by_fact_id === id)
     throw new MemoryError(400, "fact cannot reference itself");
-  for (const [field, message] of [
-    ["supersedes_fact_id", "superseded fact not found"],
-    ["superseded_by_fact_id", "superseding fact not found"],
-  ] as const) {
-    const referencedId = input[field];
-    if (referencedId === undefined || referencedId === null) continue;
-    const referenced = (
-      await db
-        .select({ id: facts.id })
-        .from(facts)
-        .where(and(eq(facts.id, String(referencedId)), eq(facts.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!referenced) throw new MemoryError(404, message);
-  }
+  const current = await factWithSupersession(ctx, row);
+  if (input.supersedes_fact_id !== undefined && input.supersedes_fact_id !== null)
+    await ensureEntity(ctx, "fact", String(input.supersedes_fact_id), "superseded fact not found");
+  if (input.superseded_by_fact_id !== undefined && input.superseded_by_fact_id !== null)
+    await ensureEntity(
+      ctx,
+      "fact",
+      String(input.superseded_by_fact_id),
+      "superseding fact not found",
+    );
   const statement = (input.statement as string | undefined) ?? row.statement;
   const updatesSupersedes = Object.hasOwn(input, "supersedes_fact_id");
   const updatesSupersededBy = Object.hasOwn(input, "superseded_by_fact_id");
   const supersedesFactId = updatesSupersedes
     ? (input.supersedes_fact_id as string | null)
-    : row.supersedesFactId;
+    : current.supersedesFactId;
   const supersededByFactId = updatesSupersededBy
     ? (input.superseded_by_fact_id as string | null)
-    : row.supersededByFactId;
+    : current.supersededByFactId;
   await db
     .update(facts)
     .set({
@@ -703,64 +1071,79 @@ export async function updateFact(ctx: Ctx, id: string, input: Record<string, unk
       citations: (input.citations as string[] | undefined) ?? row.citations,
       confidence: input.confidence === undefined ? row.confidence : Number(input.confidence),
       status: (input.status as string | undefined) ?? row.status,
-      supersedesFactId,
-      supersededByFactId,
       metadata: input.topics ? { topics: input.topics as string[] } : row.metadata,
       updatedAt: now(),
     })
     .where(eq(facts.id, id));
-  if (updatesSupersedes && row.supersedesFactId && row.supersedesFactId !== supersedesFactId)
+  if (updatesSupersedes) {
     await db
-      .update(facts)
-      .set({ supersededByFactId: null, updatedAt: now() })
+      .delete(dependencyEdges)
       .where(
         and(
-          eq(facts.id, row.supersedesFactId),
-          eq(facts.ownerId, ctx.user.id),
-          eq(facts.supersededByFactId, id),
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependentKind, "fact"),
+          eq(dependencyEdges.dependentId, id),
+          eq(dependencyEdges.dependencyKind, "fact"),
+          eq(dependencyEdges.relationship, "supersedes"),
         ),
       );
+    if (supersedesFactId)
+      await createDependency(ctx, {
+        dependent: { kind: "fact", id },
+        dependency: { kind: "fact", id: supersedesFactId },
+        relationship: "supersedes",
+      });
+  }
+  if (updatesSupersededBy) {
+    await db
+      .delete(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.ownerId, ctx.user.id),
+          eq(dependencyEdges.dependentKind, "fact"),
+          eq(dependencyEdges.dependencyKind, "fact"),
+          eq(dependencyEdges.dependencyId, id),
+          eq(dependencyEdges.relationship, "supersedes"),
+        ),
+      );
+    if (supersededByFactId)
+      await createDependency(ctx, {
+        dependent: { kind: "fact", id: supersededByFactId },
+        dependency: { kind: "fact", id },
+        relationship: "supersedes",
+      });
+  }
   if (supersedesFactId)
     await db
       .update(facts)
-      .set({ status: "superseded", supersededByFactId: id, updatedAt: now() })
+      .set({ status: "superseded", updatedAt: now() })
       .where(and(eq(facts.id, supersedesFactId), eq(facts.ownerId, ctx.user.id)));
-  if (
-    updatesSupersededBy &&
-    row.supersededByFactId &&
-    row.supersededByFactId !== supersededByFactId
-  )
-    await db
-      .update(facts)
-      .set({ supersedesFactId: null, updatedAt: now() })
-      .where(
-        and(
-          eq(facts.id, row.supersededByFactId),
-          eq(facts.ownerId, ctx.user.id),
-          eq(facts.supersedesFactId, id),
-        ),
-      );
-  if (supersededByFactId)
-    await db
-      .update(facts)
-      .set({ supersedesFactId: id, updatedAt: now() })
-      .where(and(eq(facts.id, supersededByFactId), eq(facts.ownerId, ctx.user.id)));
   if (input.statement !== undefined)
     await upsertVector(ctx, id, await embed(ctx, statement), {
       kind: "fact",
       owner_id: ctx.user.id,
       ...(row.projectId ? { project_id: row.projectId } : {}),
     });
-  return (await db.select().from(facts).where(eq(facts.id, id)))[0];
+  await markDownstreamStale(ctx, "fact", id);
+  const updated = (await db.select().from(facts).where(eq(facts.id, id)))[0];
+  if (!updated) throw new MemoryError(404, "fact not found");
+  return factWithSupersession(ctx, updated);
 }
 
 export async function addDocument(
   ctx: Ctx,
-  input: { title: string; content: string; project_id?: string; mime_type?: string },
+  input: {
+    title: string;
+    content: string;
+    project_id?: string;
+    mime_type?: string;
+    derived_from?: Parameters<typeof applyFactDerivations>[2];
+  },
 ) {
   await ensureProject(ctx, input.project_id);
   const db = createDb(ctx.env.DB);
   const id = createId("document");
+  await validateFactDerivations(ctx, id, input.derived_from);
   const r2Key = `${ctx.user.id}/${id}.md`;
   await ctx.env.DOCUMENTS.put(r2Key, input.content, {
     httpMetadata: { contentType: input.mime_type ?? "text/markdown" },
@@ -776,8 +1159,50 @@ export async function addDocument(
     sizeBytes: new TextEncoder().encode(input.content).byteLength,
   };
   await db.insert(documents).values(row);
+  await applyDocumentDerivations(ctx, id, input.derived_from);
   await insertChunks(ctx, id, input.content, input.project_id ?? null);
   return row;
+}
+
+async function applyDocumentDerivations(
+  ctx: Ctx,
+  documentId: string,
+  derived?: Parameters<typeof applyFactDerivations>[2],
+) {
+  if (!derived) return;
+  for (const id of derived.thought_ids ?? []) {
+    await ensureEntity(ctx, "thought", id, "source thought not found");
+    await createDependency(ctx, {
+      dependent: { kind: "document", id: documentId },
+      dependency: { kind: "thought", id },
+      relationship: "derived_from",
+    });
+  }
+  for (const id of derived.fact_ids ?? []) {
+    await ensureEntity(ctx, "fact", id, "source fact not found");
+    await createDependency(ctx, {
+      dependent: { kind: "document", id: documentId },
+      dependency: { kind: "fact", id },
+      relationship: "derived_from",
+    });
+  }
+  for (const id of derived.document_ids ?? []) {
+    if (id === documentId) throw new MemoryError(400, "document cannot derive from itself");
+    await ensureEntity(ctx, "document", id, "source document not found");
+    await createDependency(ctx, {
+      dependent: { kind: "document", id: documentId },
+      dependency: { kind: "document", id },
+      relationship: "derived_from",
+    });
+  }
+  for (const id of derived.document_chunk_ids ?? []) {
+    await ensureEntity(ctx, "document_chunk", id, "source document chunk not found");
+    await createDependency(ctx, {
+      dependent: { kind: "document", id: documentId },
+      dependency: { kind: "document_chunk", id },
+      relationship: "derived_from",
+    });
+  }
 }
 
 async function insertChunks(
@@ -800,7 +1225,12 @@ async function insertChunks(
   }
 }
 
-export async function updateDocument(ctx: Ctx, id: string, content: string) {
+export async function updateDocument(
+  ctx: Ctx,
+  id: string,
+  content: string,
+  derivedFrom?: Parameters<typeof applyFactDerivations>[2],
+) {
   const db = createDb(ctx.env.DB);
   const doc = (
     await db
@@ -810,10 +1240,18 @@ export async function updateDocument(ctx: Ctx, id: string, content: string) {
       .limit(1)
   )[0];
   if (!doc) throw new MemoryError(404, "document not found");
+  if (derivedFrom) await validateFactDerivations(ctx, id, derivedFrom);
+  await markDownstreamStale(ctx, "document", id);
   const oldChunks = await db
     .select({ id: documentChunks.id })
     .from(documentChunks)
     .where(eq(documentChunks.documentId, id));
+  await cleanDocumentChunkGraphEdges(
+    ctx,
+    id,
+    oldChunks.map((c) => c.id),
+    { retargetDependencyEdgesToDocument: true, staleReason: "document_chunks_replaced" },
+  );
   await deleteVectors(
     ctx,
     oldChunks.map((c) => c.id),
@@ -824,6 +1262,10 @@ export async function updateDocument(ctx: Ctx, id: string, content: string) {
     .update(documents)
     .set({ sizeBytes: new TextEncoder().encode(content).byteLength, updatedAt: now() })
     .where(eq(documents.id, id));
+  if (derivedFrom) {
+    await replaceDependencies(ctx, "document", id, "derived_from", []);
+    await applyDocumentDerivations(ctx, id, derivedFrom);
+  }
   await insertChunks(ctx, id, content, doc.projectId);
   return (await db.select().from(documents).where(eq(documents.id, id)))[0];
 }
@@ -855,54 +1297,62 @@ export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unkn
     projectId: (input.project_id as string | undefined) ?? null,
     source: source(ctx),
     seriesKey: String(input.series_key),
-    subjectType: (input.subject_type as string | undefined) ?? null,
-    subjectId: (input.subject_id as string | undefined) ?? null,
     value: input.value === undefined || input.value === null ? null : Number(input.value),
     unit: (input.unit as string | undefined) ?? null,
     observedAt: asDate(input.observed_at) ?? now(),
     metadata: (input.metadata as Record<string, unknown> | undefined) ?? {},
   };
   await createDb(ctx.env.DB).insert(timeSeriesPoints).values(row);
-  return row;
+  if (input.subject_type && input.subject_id)
+    await createDependency(ctx, {
+      dependent: { kind: "time_series_point", id: row.id },
+      dependency: { kind: asGraphKind(input.subject_type), id: String(input.subject_id) },
+      relationship: "observes_subject",
+    });
+  return {
+    ...row,
+    subjectType: (input.subject_type as string | undefined) ?? null,
+    subjectId: (input.subject_id as string | undefined) ?? null,
+  };
 }
 
 async function validateSubject(ctx: Ctx, type?: string, id?: string) {
   if (!type || !id) return;
-  const db = createDb(ctx.env.DB);
-  const checks: Record<string, Promise<unknown[]>> = {
-    person: db
-      .select({ id: people.id })
-      .from(people)
-      .where(and(eq(people.id, id), eq(people.ownerId, ctx.user.id)))
-      .limit(1),
-    task: db
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
-      .limit(1),
-    project: db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
-      .limit(1),
-    fact: db
-      .select({ id: facts.id })
-      .from(facts)
-      .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
-      .limit(1),
-  };
-  if (checks[type] && !(await checks[type])[0]) throw new MemoryError(404, "subject not found");
+  await ensureEntity(ctx, asGraphKind(type), id, "subject not found");
 }
 
 export async function listTimeSeriesPoints(ctx: Ctx, q: Record<string, string | undefined>) {
   const filters = [eq(timeSeriesPoints.ownerId, ctx.user.id)];
   if (q.series_key) filters.push(eq(timeSeriesPoints.seriesKey, q.series_key));
   if (q.project_id) filters.push(eq(timeSeriesPoints.projectId, q.project_id));
-  if (q.subject_type) filters.push(eq(timeSeriesPoints.subjectType, q.subject_type));
-  if (q.subject_id) filters.push(eq(timeSeriesPoints.subjectId, q.subject_id));
   if (q.from) filters.push(gte(timeSeriesPoints.observedAt, asDate(Number(q.from)) ?? now()));
   if (q.to) filters.push(lte(timeSeriesPoints.observedAt, asDate(Number(q.to)) ?? now()));
-  return createDb(ctx.env.DB)
+  const db = createDb(ctx.env.DB);
+  if (q.subject_type || q.subject_id) {
+    const graphFilters = [
+      ...filters,
+      eq(dependencyEdges.ownerId, ctx.user.id),
+      eq(dependencyEdges.dependentKind, "time_series_point"),
+      eq(dependencyEdges.dependentId, timeSeriesPoints.id),
+      eq(dependencyEdges.relationship, "observes_subject"),
+    ];
+    if (q.subject_type) graphFilters.push(eq(dependencyEdges.dependencyKind, q.subject_type));
+    if (q.subject_id) graphFilters.push(eq(dependencyEdges.dependencyId, q.subject_id));
+    return db
+      .select({ point: timeSeriesPoints, edge: dependencyEdges })
+      .from(timeSeriesPoints)
+      .innerJoin(dependencyEdges, eq(dependencyEdges.dependentId, timeSeriesPoints.id))
+      .where(and(...graphFilters))
+      .orderBy(desc(timeSeriesPoints.observedAt))
+      .then((rows) =>
+        rows.map((r) => ({
+          ...r.point,
+          subjectType: r.edge.dependencyKind,
+          subjectId: r.edge.dependencyId,
+        })),
+      );
+  }
+  return db
     .select()
     .from(timeSeriesPoints)
     .where(and(...filters))
@@ -1060,11 +1510,12 @@ async function resolveRecallRows(
 }
 
 export async function listFacts(ctx: Ctx) {
-  return createDb(ctx.env.DB)
+  const rows = await createDb(ctx.env.DB)
     .select()
     .from(facts)
     .where(eq(facts.ownerId, ctx.user.id))
     .orderBy(desc(facts.createdAt));
+  return Promise.all(rows.map((row) => factWithSupersession(ctx, row)));
 }
 export async function listThoughts(ctx: Ctx) {
   return createDb(ctx.env.DB)
@@ -1081,6 +1532,17 @@ export async function listDocuments(ctx: Ctx) {
     .orderBy(desc(documents.createdAt));
 }
 
+async function deleteGraphEdgesTouching(ctx: Ctx, id: string) {
+  const endpointFilter = or(
+    eq(dependencyEdges.dependentId, id),
+    eq(dependencyEdges.dependencyId, id),
+  );
+  if (!endpointFilter) return;
+  await createDb(ctx.env.DB)
+    .delete(dependencyEdges)
+    .where(and(eq(dependencyEdges.ownerId, ctx.user.id), endpointFilter));
+}
+
 export async function deleteThought(ctx: Ctx, id: string) {
   const db = createDb(ctx.env.DB);
   const row = (
@@ -1091,6 +1553,7 @@ export async function deleteThought(ctx: Ctx, id: string) {
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "thought not found");
+  await deleteGraphEdgesTouching(ctx, id);
   await db.delete(thoughts).where(eq(thoughts.id, id));
   await deleteVectors(ctx, [id]);
   return { ok: true };
@@ -1105,6 +1568,7 @@ export async function deleteFact(ctx: Ctx, id: string) {
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "fact not found");
+  await deleteGraphEdgesTouching(ctx, id);
   await db.delete(facts).where(eq(facts.id, id));
   await deleteVectors(ctx, [id]);
   return { ok: true };
@@ -1123,11 +1587,18 @@ export async function deleteDocument(ctx: Ctx, id: string) {
     .select({ id: documentChunks.id })
     .from(documentChunks)
     .where(eq(documentChunks.documentId, id));
+  await cleanDocumentChunkGraphEdges(
+    ctx,
+    id,
+    chunkIds.map((c) => c.id),
+    { retargetDependencyEdgesToDocument: false, staleReason: "document_deleted" },
+  );
   await deleteVectors(
     ctx,
     chunkIds.map((c) => c.id),
   );
   await ctx.env.DOCUMENTS.delete(doc.r2Key);
+  await deleteGraphEdgesTouching(ctx, id);
   await db.delete(documents).where(eq(documents.id, id));
   return { ok: true };
 }

@@ -81,16 +81,18 @@ PBI-005 (`tasks/PBI-005-dependency-graph.md`) implements this spec before the de
 
 ### Definition Of Done
 
-- [ ] Drizzle schema defines `dependency_edges` with the fields, allowed kind/relationship validation, uniqueness, and indexes described here.
-- [ ] Migration creates `dependency_edges`, migrates existing thought links, fact derivation links, fact supersession pointers, and time-series subject references into graph edges, then removes the redundant tables/columns.
-- [ ] App-generated dependency edge IDs use `bf<20 lowercase Crockford Base32 chars>e`.
-- [ ] `remember`, `link`, `record_fact`, `update_fact`, `record_time_series_point`, `list_time_series_points`, `add_document`, and `update_document` use dependency graph edges for relationships described in this spec.
-- [ ] New MCP tools `create_dependency`, `delete_dependency`, `list_dependencies`, `mark_stale`, and `list_stale` exist and are authenticated/owner-scoped.
-- [ ] REST routes under `/api/v1/dependencies` mirror the dependency graph tools and are authenticated/owner-scoped.
-- [ ] Updates to upstream objects mark dependency-bearing downstream edges stale without marking weak reference edges stale by default.
-- [ ] Owner validation rejects cross-user edges and dangling object references.
-- [ ] `pnpm test` includes coverage for migration shape, compatibility inputs (`links`, `derived_from`, `supersedes_fact_id`, `subject_type`/`subject_id`), cross-owner rejection, upstream/downstream queries, and staleness marking.
-- [ ] `pnpm check && pnpm typecheck && pnpm test` pass.
+- [x] Drizzle schema defines `dependency_edges` with the fields, allowed kind/relationship validation, uniqueness, and indexes described here.
+- [x] Migration creates `dependency_edges`, migrates existing thought links, fact derivation links, fact supersession pointers, and time-series subject references into graph edges, then removes the redundant tables/columns.
+- [x] App-generated dependency edge IDs use `bf<20 lowercase Crockford Base32 chars>e`.
+- [x] `remember`, `link`, `record_fact`, `update_fact`, `record_time_series_point`, `list_time_series_points`, `add_document`, and `update_document` use dependency graph edges for relationships described in this spec.
+- [x] New MCP tools `create_dependency`, `delete_dependency`, `list_dependencies`, `mark_stale`, and `list_stale` exist and are authenticated/owner-scoped.
+- [x] REST routes under `/api/v1/dependencies` mirror the dependency graph tools and are authenticated/owner-scoped.
+- [x] Updates to upstream objects mark dependency-bearing downstream edges stale without marking weak reference edges stale by default.
+- [x] Owner validation rejects cross-user edges and dangling object references.
+- [x] `pnpm test` includes coverage for migration shape, compatibility inputs (`links`, `derived_from`, `supersedes_fact_id`, `subject_type`/`subject_id`), cross-owner rejection, upstream/downstream queries, and staleness marking.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass.
+
+Completion evidence: PBI-005 implementation added the `dependency_edges` Drizzle schema and migration, migrated/replaced the prior thought-link/fact-derivation/fact-supersession/time-series-subject relationship storage, updated the memory service, MCP tools, REST routes, and tests to use the graph, and added stale-edge handling including document-chunk regeneration/delete cleanup. Verified on 2026-06-14 with `pnpm check && pnpm typecheck && pnpm test` (35/35 tests passed). Critic review completed four passes; final report found no blocking issues and confirmed auth, owner scoping, D1 canonical storage, and Vectorize rebuildability invariants were preserved. Known non-blocking output: Biome reports schema/deprecation infos and Vitest sometimes emits a post-success Vite close-timeout warning.
 
 ### Regression Guardrails
 

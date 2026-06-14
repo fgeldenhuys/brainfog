@@ -1,15 +1,5 @@
 import { sql } from "drizzle-orm";
-import {
-  type AnySQLiteColumn,
-  check,
-  index,
-  integer,
-  primaryKey,
-  real,
-  sqliteTable,
-  text,
-  unique,
-} from "drizzle-orm/sqlite-core";
+import { check, index, integer, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable(
   "users",
@@ -111,12 +101,6 @@ export const facts = sqliteTable(
     citations: text("citations", { mode: "json" }).$type<string[]>().notNull().default(sql`'[]'`),
     confidence: real("confidence").notNull().default(0.5),
     status: text("status").notNull().default("current"),
-    supersedesFactId: text("supersedes_fact_id").references((): AnySQLiteColumn => facts.id, {
-      onDelete: "set null",
-    }),
-    supersededByFactId: text("superseded_by_fact_id").references((): AnySQLiteColumn => facts.id, {
-      onDelete: "set null",
-    }),
     metadata: text("metadata", { mode: "json" })
       .$type<{ topics?: string[] }>()
       .notNull()
@@ -128,8 +112,6 @@ export const facts = sqliteTable(
     check("facts_status_check", sql`${table.status} in ('current','superseded','proven_wrong')`),
     index("facts_owner_project_idx").on(table.ownerId, table.projectId),
     index("facts_owner_status_idx").on(table.ownerId, table.status),
-    index("facts_supersedes_idx").on(table.supersedesFactId),
-    index("facts_superseded_by_idx").on(table.supersededByFactId),
   ],
 );
 
@@ -204,8 +186,6 @@ export const timeSeriesPoints = sqliteTable(
     projectId: text("project_id").references(() => projects.id),
     source: text("source").notNull(),
     seriesKey: text("series_key").notNull(),
-    subjectType: text("subject_type"),
-    subjectId: text("subject_id"),
     value: real("value"),
     unit: text("unit"),
     observedAt: integer("observed_at", { mode: "timestamp" }).notNull(),
@@ -226,132 +206,63 @@ export const timeSeriesPoints = sqliteTable(
       table.projectId,
       table.observedAt,
     ),
-    index("time_series_owner_subject_observed_idx").on(
-      table.ownerId,
-      table.subjectType,
-      table.subjectId,
-      table.observedAt,
-    ),
   ],
 );
 
-export const thoughtPeople = sqliteTable(
-  "thought_people",
+export const dependencyEdges = sqliteTable(
+  "dependency_edges",
   {
-    thoughtId: text("thought_id")
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
       .notNull()
-      .references(() => thoughts.id, { onDelete: "cascade" }),
-    personId: text("person_id")
+      .references(() => users.id),
+    source: text("source").notNull(),
+    dependentKind: text("dependent_kind").notNull(),
+    dependentId: text("dependent_id").notNull(),
+    dependencyKind: text("dependency_kind").notNull(),
+    dependencyId: text("dependency_id").notNull(),
+    relationship: text("relationship").notNull(),
+    metadata: text("metadata", { mode: "json" })
+      .$type<Record<string, unknown>>()
       .notNull()
-      .references(() => people.id, { onDelete: "cascade" }),
+      .default(sql`'{}'`),
+    staleAt: integer("stale_at", { mode: "timestamp" }),
+    staleReason: text("stale_reason"),
+    lastVerifiedAt: integer("last_verified_at", { mode: "timestamp" }),
+    ...timestamps,
   },
   (table) => [
-    primaryKey({ columns: [table.thoughtId, table.personId] }),
-    index("thought_people_person_idx").on(table.personId),
-  ],
-);
-export const thoughtTasks = sqliteTable(
-  "thought_tasks",
-  {
-    thoughtId: text("thought_id")
-      .notNull()
-      .references(() => thoughts.id, { onDelete: "cascade" }),
-    taskId: text("task_id")
-      .notNull()
-      .references(() => tasks.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.thoughtId, table.taskId] }),
-    index("thought_tasks_task_idx").on(table.taskId),
-  ],
-);
-export const thoughtFacts = sqliteTable(
-  "thought_facts",
-  {
-    thoughtId: text("thought_id")
-      .notNull()
-      .references(() => thoughts.id, { onDelete: "cascade" }),
-    factId: text("fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.thoughtId, table.factId] }),
-    index("thought_facts_fact_idx").on(table.factId),
-  ],
-);
-export const thoughtDocuments = sqliteTable(
-  "thought_documents",
-  {
-    thoughtId: text("thought_id")
-      .notNull()
-      .references(() => thoughts.id, { onDelete: "cascade" }),
-    documentId: text("document_id")
-      .notNull()
-      .references(() => documents.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.thoughtId, table.documentId] }),
-    index("thought_documents_document_idx").on(table.documentId),
-  ],
-);
-export const factSourceThoughts = sqliteTable(
-  "fact_source_thoughts",
-  {
-    factId: text("fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-    thoughtId: text("thought_id")
-      .notNull()
-      .references(() => thoughts.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.factId, table.thoughtId] }),
-    index("fact_source_thoughts_thought_idx").on(table.thoughtId),
-  ],
-);
-export const factSourceFacts = sqliteTable(
-  "fact_source_facts",
-  {
-    factId: text("fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-    sourceFactId: text("source_fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.factId, table.sourceFactId] }),
-    index("fact_source_facts_source_idx").on(table.sourceFactId),
-  ],
-);
-export const factSourceDocuments = sqliteTable(
-  "fact_source_documents",
-  {
-    factId: text("fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-    documentId: text("document_id")
-      .notNull()
-      .references(() => documents.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.factId, table.documentId] }),
-    index("fact_source_documents_document_idx").on(table.documentId),
-  ],
-);
-export const factSourceDocumentChunks = sqliteTable(
-  "fact_source_document_chunks",
-  {
-    factId: text("fact_id")
-      .notNull()
-      .references(() => facts.id, { onDelete: "cascade" }),
-    documentChunkId: text("document_chunk_id")
-      .notNull()
-      .references(() => documentChunks.id, { onDelete: "cascade" }),
-  },
-  (table) => [
-    primaryKey({ columns: [table.factId, table.documentChunkId] }),
-    index("fact_source_document_chunks_chunk_idx").on(table.documentChunkId),
+    check(
+      "dependency_edges_dependent_kind_check",
+      sql`${table.dependentKind} in ('project','person','task','fact','time_series_point','document','document_chunk','thought')`,
+    ),
+    check(
+      "dependency_edges_dependency_kind_check",
+      sql`${table.dependencyKind} in ('project','person','task','fact','time_series_point','document','document_chunk','thought')`,
+    ),
+    check(
+      "dependency_edges_relationship_check",
+      sql`${table.relationship} in ('references','derived_from','summarizes','supersedes','observes_subject','mentions','related_to')`,
+    ),
+    unique("dependency_edges_unique").on(
+      table.ownerId,
+      table.dependentKind,
+      table.dependentId,
+      table.dependencyKind,
+      table.dependencyId,
+      table.relationship,
+    ),
+    index("dependency_edges_dependent_idx").on(
+      table.ownerId,
+      table.dependentKind,
+      table.dependentId,
+    ),
+    index("dependency_edges_dependency_idx").on(
+      table.ownerId,
+      table.dependencyKind,
+      table.dependencyId,
+    ),
+    index("dependency_edges_relationship_idx").on(table.ownerId, table.relationship),
+    index("dependency_edges_stale_idx").on(table.ownerId, table.staleAt),
   ],
 );

@@ -3,8 +3,10 @@ import { Hono } from "hono";
 import type { Env } from "../env";
 import {
   addDocument,
+  createDependency,
   createProject,
   createTask,
+  deleteDependency,
   deleteDocument,
   deleteFact,
   deleteThought,
@@ -12,14 +14,17 @@ import {
   getDocumentContent,
   getSelfPerson,
   linkThought,
+  listDependencies,
   listDocuments,
   listFacts,
   listPeople,
   listProjects,
+  listStale,
   listTasks,
   listThoughts,
   listTimeSeriesPoints,
   MemoryError,
+  markStale,
   recall,
   recordFact,
   recordTimeSeriesPoint,
@@ -180,7 +185,14 @@ apiRoutes.patch(
   "/documents/:id",
   route(async (c) => {
     const payload = await body(c);
-    return c.json(await updateDocument(ctx(c), param(c, "id"), String(payload.content ?? "")));
+    return c.json(
+      await updateDocument(
+        ctx(c),
+        param(c, "id"),
+        String(payload.content ?? ""),
+        payload.derived_from as Parameters<typeof updateDocument>[3],
+      ),
+    );
   }),
 );
 apiRoutes.delete(
@@ -217,6 +229,50 @@ apiRoutes.get(
 apiRoutes.post(
   "/time-series-points",
   route(async (c) => c.json(await recordTimeSeriesPoint(ctx(c), await body(c)), 201)),
+);
+
+apiRoutes.get(
+  "/dependencies",
+  route(async (c) =>
+    c.json(
+      await listDependencies(ctx(c), {
+        entity_kind: String(c.req.query("entity_kind") ?? ""),
+        entity_id: String(c.req.query("entity_id") ?? ""),
+        direction: c.req.query("direction"),
+        relationship: c.req.query("relationship"),
+      }),
+    ),
+  ),
+);
+apiRoutes.post(
+  "/dependencies",
+  route(async (c) =>
+    c.json(
+      await createDependency(ctx(c), (await body(c)) as Parameters<typeof createDependency>[1]),
+      201,
+    ),
+  ),
+);
+apiRoutes.delete(
+  "/dependencies/:id",
+  route(async (c) => c.json(await deleteDependency(ctx(c), param(c, "id")))),
+);
+apiRoutes.post(
+  "/dependencies/stale",
+  route(async (c) =>
+    c.json(await markStale(ctx(c), (await body(c)) as Parameters<typeof markStale>[1])),
+  ),
+);
+apiRoutes.get(
+  "/dependencies/stale",
+  route(async (c) =>
+    c.json(
+      await listStale(ctx(c), {
+        kind: c.req.query("kind"),
+        project_id: c.req.query("project_id"),
+      }),
+    ),
+  ),
 );
 
 apiRoutes.get(

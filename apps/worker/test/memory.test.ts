@@ -1,19 +1,15 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
 import {
   createDb,
+  dependencyEdges,
   documentChunks,
   documents,
-  factSourceDocumentChunks,
-  factSourceDocuments,
-  factSourceFacts,
-  factSourceThoughts,
   facts,
   people,
   projects,
   tasks,
-  thoughtFacts,
-  thoughtPeople,
   thoughts,
+  timeSeriesPoints,
   tokens,
   users,
 } from "@brainfog/db";
@@ -121,6 +117,14 @@ async function callMcpTool<T>(name: string, args: Record<string, unknown>, token
   return JSON.parse(m.result?.content?.[0]?.text ?? "null") as T;
 }
 
+function dependencyGraphMigrationSql() {
+  const migration = (
+    env.TEST_MIGRATIONS as unknown as Array<{ name?: string; queries?: string[] }>
+  ).find((m) => m.name?.includes("0003_dependency_graph"));
+  if (!migration) throw new Error("0003_dependency_graph migration not found");
+  return migration.queries?.join("\n") ?? "";
+}
+
 describe("memory model REST service", () => {
   beforeAll(async () => {
     await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
@@ -216,8 +220,14 @@ describe("memory model REST service", () => {
     const link = (
       await createDb(env.DB)
         .select()
-        .from(thoughtPeople)
-        .where(and(eq(thoughtPeople.thoughtId, thought.id), eq(thoughtPeople.personId, person.id)))
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentId, thought.id),
+            eq(dependencyEdges.dependencyId, person.id),
+            eq(dependencyEdges.relationship, "references"),
+          ),
+        )
     )[0];
     expect(link).toBeTruthy();
 
@@ -269,23 +279,48 @@ describe("memory model REST service", () => {
       (
         await createDb(env.DB)
           .select()
-          .from(factSourceThoughts)
-          .where(eq(factSourceThoughts.factId, fact.id))
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.dependentId, fact.id),
+              eq(dependencyEdges.dependencyId, thought.id),
+              eq(dependencyEdges.relationship, "derived_from"),
+            ),
+          )
       )[0],
     ).toBeTruthy();
     expect(
       (
         await createDb(env.DB)
           .select()
-          .from(factSourceFacts)
-          .where(eq(factSourceFacts.factId, fact.id))
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.dependentId, fact.id),
+              eq(dependencyEdges.dependencyId, base.id),
+              eq(dependencyEdges.relationship, "derived_from"),
+            ),
+          )
       )[0],
     ).toBeTruthy();
     const old = (await createDb(env.DB).select().from(facts).where(eq(facts.id, base.id)))[0];
     expect(old).toBeTruthy();
     if (!old) throw new Error("old fact missing");
     expect(old.status).toBe("superseded");
-    expect(old.supersededByFactId).toBe(fact.id);
+    expect(
+      (
+        await createDb(env.DB)
+          .select()
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.dependentId, fact.id),
+              eq(dependencyEdges.dependencyId, base.id),
+              eq(dependencyEdges.relationship, "supersedes"),
+            ),
+          )
+      )[0],
+    ).toBeTruthy();
 
     const updated = await json<{ statement: string; status: string }>(
       await authFetch(`/api/v1/facts/${fact.id}`, {
@@ -338,10 +373,23 @@ describe("memory model REST service", () => {
       if (!row) throw new Error(`fact ${id} missing`);
       return row;
     };
-    let refreshedOlderA = await getFact(olderA.id);
-    let refreshedOlderB = await getFact(olderB.id);
-    expect(refreshedOlderA.supersededByFactId).toBeNull();
-    expect(refreshedOlderB.supersededByFactId).toBe(newer.id);
+    const supersedesEdge = async (dependentId: string, dependencyId: string) =>
+      (
+        await db
+          .select()
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.dependentId, dependentId),
+              eq(dependencyEdges.dependencyId, dependencyId),
+              eq(dependencyEdges.relationship, "supersedes"),
+            ),
+          )
+      )[0];
+    await getFact(olderA.id);
+    await getFact(olderB.id);
+    expect(await supersedesEdge(newer.id, olderA.id)).toBeUndefined();
+    expect(await supersedesEdge(newer.id, olderB.id)).toBeTruthy();
 
     await json(
       await authFetch(`/api/v1/facts/${newer.id}`, {
@@ -350,10 +398,9 @@ describe("memory model REST service", () => {
       }),
     );
 
-    const refreshedNewer = await getFact(newer.id);
-    refreshedOlderB = await getFact(olderB.id);
-    expect(refreshedNewer.supersedesFactId).toBeNull();
-    expect(refreshedOlderB.supersededByFactId).toBeNull();
+    await getFact(newer.id);
+    await getFact(olderB.id);
+    expect(await supersedesEdge(newer.id, olderB.id)).toBeUndefined();
 
     const newest = await json<{ id: string }>(
       await authFetch("/api/v1/facts", {
@@ -369,10 +416,9 @@ describe("memory model REST service", () => {
       }),
     );
 
-    refreshedOlderA = await getFact(olderA.id);
-    let refreshedNewest = await getFact(newest.id);
-    expect(refreshedOlderA.supersededByFactId).toBe(newest.id);
-    expect(refreshedNewest.supersedesFactId).toBe(olderA.id);
+    await getFact(olderA.id);
+    await getFact(newest.id);
+    expect(await supersedesEdge(newest.id, olderA.id)).toBeTruthy();
 
     await json(
       await authFetch(`/api/v1/facts/${olderA.id}`, {
@@ -381,10 +427,9 @@ describe("memory model REST service", () => {
       }),
     );
 
-    refreshedOlderA = await getFact(olderA.id);
-    refreshedNewest = await getFact(newest.id);
-    expect(refreshedOlderA.supersededByFactId).toBeNull();
-    expect(refreshedNewest.supersedesFactId).toBeNull();
+    await getFact(olderA.id);
+    await getFact(newest.id);
+    expect(await supersedesEdge(newest.id, olderA.id)).toBeUndefined();
   });
 
   it("stores documents in R2, chunks them, updates chunks, and cleans up", async () => {
@@ -431,6 +476,126 @@ describe("memory model REST service", () => {
     ).toBe(0);
   });
 
+  it("update_document preserves stale chunk-derived dependencies without dangling chunk edges", async () => {
+    const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+    const doc = await addDocument(ctx, {
+      title: "Chunk source update",
+      content: "chunk source body",
+    });
+    const oldChunk = (
+      await createDb(env.DB)
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .where(eq(documentChunks.documentId, doc.id))
+    )[0];
+    if (!oldChunk) throw new Error("expected document chunk");
+    const fact = await recordFact(ctx, {
+      statement: "Fact derived from a soon-to-be-replaced chunk",
+      derived_from: { document_chunk_ids: [oldChunk.id] },
+    });
+
+    await updateDocument(ctx, doc.id, "replacement body with replacement chunks");
+
+    const db = createDb(env.DB);
+    expect(
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependencyKind, "document_chunk"),
+            eq(dependencyEdges.dependencyId, oldChunk.id),
+          ),
+        ),
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentKind, "document_chunk"),
+            eq(dependencyEdges.dependentId, oldChunk.id),
+          ),
+        ),
+    ).toHaveLength(0);
+
+    const retargeted = (
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentKind, "fact"),
+            eq(dependencyEdges.dependentId, fact.id),
+            eq(dependencyEdges.dependencyKind, "document"),
+            eq(dependencyEdges.dependencyId, doc.id),
+            eq(dependencyEdges.relationship, "derived_from"),
+          ),
+        )
+    )[0];
+    expect(retargeted).toBeTruthy();
+    expect(retargeted?.staleAt).not.toBeNull();
+    expect(retargeted?.staleReason).toBe("document_chunks_replaced");
+  });
+
+  it("delete_document removes graph edges touching deleted document chunks", async () => {
+    const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+    const doc = await addDocument(ctx, {
+      title: "Chunk source delete",
+      content: "delete chunk source body",
+    });
+    const chunk = (
+      await createDb(env.DB)
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .where(eq(documentChunks.documentId, doc.id))
+    )[0];
+    if (!chunk) throw new Error("expected document chunk");
+    const fact = await recordFact(ctx, {
+      statement: "Fact derived from a soon-to-be-deleted chunk",
+      derived_from: { document_chunk_ids: [chunk.id] },
+    });
+
+    await deleteDocument(ctx, doc.id);
+
+    const db = createDb(env.DB);
+    expect(
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependencyKind, "document_chunk"),
+            eq(dependencyEdges.dependencyId, chunk.id),
+          ),
+        ),
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentKind, "document_chunk"),
+            eq(dependencyEdges.dependentId, chunk.id),
+          ),
+        ),
+    ).toHaveLength(0);
+    expect(
+      await db
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentKind, "fact"),
+            eq(dependencyEdges.dependentId, fact.id),
+            eq(dependencyEdges.dependencyId, chunk.id),
+          ),
+        ),
+    ).toHaveLength(0);
+  });
+
   it("validates recurrence and records owner-scoped time-series points", async () => {
     const invalid = await authFetch("/api/v1/tasks", {
       method: "POST",
@@ -469,6 +634,39 @@ describe("memory model REST service", () => {
       ),
     );
     expect(points.map((p) => p.id)).toContain(point.id);
+
+    const subjectFiltered = await json<{ id: string; subjectType: string; subjectId: string }[]>(
+      await authFetch(
+        `/api/v1/time-series-points?subject_type=task&subject_id=${task.id}&series_key=build.duration_ms`,
+      ),
+    );
+    expect(subjectFiltered).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: point.id, subjectType: "task", subjectId: task.id }),
+      ]),
+    );
+    expect(
+      (
+        await createDb(env.DB)
+          .select()
+          .from(dependencyEdges)
+          .where(
+            and(
+              eq(dependencyEdges.dependentId, point.id),
+              eq(dependencyEdges.dependencyId, task.id),
+              eq(dependencyEdges.relationship, "observes_subject"),
+            ),
+          )
+      )[0],
+    ).toBeTruthy();
+    expect(
+      (
+        await createDb(env.DB)
+          .select()
+          .from(timeSeriesPoints)
+          .where(eq(timeSeriesPoints.id, point.id))
+      )[0],
+    ).not.toHaveProperty("subjectType");
 
     const otherUsersPoints = await json<unknown[]>(
       await authFetch("/api/v1/time-series-points?series_key=build.duration_ms", {}, TOKEN_B),
@@ -585,7 +783,203 @@ describe("memory model REST service", () => {
         "create_project",
         "list_projects",
         "link",
+        "create_dependency",
+        "delete_dependency",
+        "list_dependencies",
+        "mark_stale",
+        "list_stale",
       ]),
+    );
+  });
+
+  it("mirrors dependency graph tools through REST with owner scope and staleness", async () => {
+    const thought = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({ content: "graph upstream thought" }),
+      }),
+    );
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Generated graph doc",
+          content: "derived document",
+          derived_from: { thought_ids: [thought.id] },
+        }),
+      }),
+    );
+
+    const upstream = await json<{ id: string; relationship: string }[]>(
+      await authFetch(
+        `/api/v1/dependencies?entity_kind=document&entity_id=${doc.id}&direction=upstream`,
+      ),
+    );
+    expect(upstream).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dependencyId: thought.id, relationship: "derived_from" }),
+      ]),
+    );
+    expect(upstream[0]?.id).toMatch(/^bf[0-9abcdefghjkmnpqrstvwxyz]{20}e$/);
+
+    const downstream = await json<
+      { dependentId: string; dependentKind: string; relationship: string }[]
+    >(
+      await authFetch(
+        `/api/v1/dependencies?entity_kind=thought&entity_id=${thought.id}&direction=downstream`,
+      ),
+    );
+    expect(downstream).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          dependentKind: "document",
+          dependentId: doc.id,
+          relationship: "derived_from",
+        }),
+      ]),
+    );
+
+    await updateDocument(
+      { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" },
+      doc.id,
+      "updated derived document",
+    );
+    const staleAfterDocumentUpdate = await json<unknown[]>(
+      await authFetch("/api/v1/dependencies/stale?kind=document"),
+    );
+    expect(staleAfterDocumentUpdate).toEqual([]);
+
+    const stale = await json<{ dependentId: string; dependencyId: string; staleReason: string }[]>(
+      await authFetch("/api/v1/dependencies/stale", {
+        method: "POST",
+        body: JSON.stringify({
+          entity_kind: "thought",
+          entity_id: thought.id,
+          reason: "source_changed",
+        }),
+      }),
+    );
+    expect(stale).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          dependentId: doc.id,
+          dependencyId: thought.id,
+          staleReason: "source_changed",
+        }),
+      ]),
+    );
+
+    const weakDependent = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({ content: "weak downstream reference" }),
+      }),
+    );
+    const weakDependency = await json<{ id: string }>(
+      await authFetch("/api/v1/people", {
+        method: "POST",
+        body: JSON.stringify({ name: "Weak Reference Person" }),
+      }),
+    );
+    await json(
+      await authFetch("/api/v1/dependencies", {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "thought", id: weakDependent.id },
+          dependency: { kind: "person", id: weakDependency.id },
+          relationship: "references",
+        }),
+      }),
+    );
+    await upsertPerson(
+      { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" },
+      { id: weakDependency.id, name: "Weak Reference Person Updated" },
+    );
+    const weakBeforeExplicit = (
+      await createDb(env.DB)
+        .select()
+        .from(dependencyEdges)
+        .where(
+          and(
+            eq(dependencyEdges.dependentId, weakDependent.id),
+            eq(dependencyEdges.dependencyId, weakDependency.id),
+            eq(dependencyEdges.relationship, "references"),
+          ),
+        )
+    )[0];
+    expect(weakBeforeExplicit?.staleAt).toBeNull();
+
+    const explicitWeakStale = await json<{ dependentId: string; relationship: string }[]>(
+      await authFetch("/api/v1/dependencies/stale", {
+        method: "POST",
+        body: JSON.stringify({
+          entity_kind: "person",
+          entity_id: weakDependency.id,
+          reason: "explicit_weak_review",
+        }),
+      }),
+    );
+    expect(explicitWeakStale).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ dependentId: weakDependent.id, relationship: "references" }),
+      ]),
+    );
+
+    const otherFact = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/facts",
+        { method: "POST", body: JSON.stringify({ statement: "other graph fact" }) },
+        TOKEN_B,
+      ),
+    );
+    const rejected = await authFetch("/api/v1/dependencies", {
+      method: "POST",
+      body: JSON.stringify({
+        dependent: { kind: "document", id: doc.id },
+        dependency: { kind: "fact", id: otherFact.id },
+        relationship: "derived_from",
+      }),
+    });
+    expect(rejected.status).toBe(404);
+  });
+
+  it("migration SQL moves pre-graph relationships to dependency_edges and drops redundant shapes", () => {
+    const sql = dependencyGraphMigrationSql();
+
+    expect(sql).toContain("CREATE TABLE IF NOT EXISTS `dependency_edges`");
+    expect(sql).toMatch(/'references'[\s\S]*FROM thought_people tp JOIN thoughts t/);
+    expect(sql).toMatch(/'references'[\s\S]*FROM thought_tasks tt JOIN thoughts t/);
+    expect(sql).toMatch(/'references'[\s\S]*FROM thought_facts tf JOIN thoughts t/);
+    expect(sql).toMatch(/'references'[\s\S]*FROM thought_documents td JOIN thoughts t/);
+    expect(sql).toMatch(/'derived_from'[\s\S]*FROM fact_source_thoughts fst JOIN facts f/);
+    expect(sql).toMatch(/'derived_from'[\s\S]*FROM fact_source_facts fsf JOIN facts f/);
+    expect(sql).toMatch(/'derived_from'[\s\S]*FROM fact_source_documents fsd JOIN facts f/);
+    expect(sql).toMatch(/'derived_from'[\s\S]*FROM fact_source_document_chunks fsc JOIN facts f/);
+    expect(sql).toMatch(/'supersedes'[\s\S]*FROM facts nf JOIN facts of/);
+    expect(sql).toMatch(/'supersedes'[\s\S]*FROM facts older JOIN facts newer/);
+    expect(sql).toMatch(
+      /'time_series_point'[\s\S]*'observes_subject'[\s\S]*FROM time_series_points s/,
+    );
+
+    for (const dropped of [
+      "thought_people",
+      "thought_tasks",
+      "thought_facts",
+      "thought_documents",
+      "fact_source_thoughts",
+      "fact_source_facts",
+      "fact_source_documents",
+      "fact_source_document_chunks",
+    ]) {
+      expect(sql).toContain(`DROP TABLE IF EXISTS \`${dropped}\``);
+    }
+    expect(sql.match(/CREATE TABLE `facts_new`[^;]+/i)?.[0]).not.toContain("supersedes_fact_id");
+    expect(sql.match(/CREATE TABLE `facts_new`[^;]+/i)?.[0]).not.toContain("superseded_by_fact_id");
+    expect(sql.match(/CREATE TABLE `time_series_points_new`[^;]+/i)?.[0]).not.toContain(
+      "subject_type",
+    );
+    expect(sql.match(/CREATE TABLE `time_series_points_new`[^;]+/i)?.[0]).not.toContain(
+      "subject_id",
     );
   });
 
@@ -646,8 +1040,18 @@ describe("memory model REST service", () => {
         },
       ),
     ).rejects.toMatchObject({ status: 404 });
-    expect(await createDb(env.DB).select().from(factSourceDocuments)).toHaveLength(0);
-    expect(await createDb(env.DB).select().from(factSourceDocumentChunks)).toHaveLength(0);
+    expect(
+      await createDb(env.DB)
+        .select()
+        .from(dependencyEdges)
+        .where(eq(dependencyEdges.dependencyId, otherDoc.id)),
+    ).toHaveLength(0);
+    expect(
+      await createDb(env.DB)
+        .select()
+        .from(dependencyEdges)
+        .where(eq(dependencyEdges.dependencyId, otherChunk?.id ?? "missing")),
+    ).toHaveLength(0);
   });
 
   it("validates recurrence on update_task", async () => {
@@ -785,16 +1189,16 @@ describe("memory model REST service", () => {
       (
         await createDb(env.DB)
           .select()
-          .from(thoughtPeople)
-          .where(eq(thoughtPeople.personId, ownPerson.id))
+          .from(dependencyEdges)
+          .where(eq(dependencyEdges.dependencyId, ownPerson.id))
       ).length,
     ).toBe(0);
     expect(
       (
         await createDb(env.DB)
           .select()
-          .from(thoughtFacts)
-          .where(eq(thoughtFacts.factId, otherFact.id))
+          .from(dependencyEdges)
+          .where(eq(dependencyEdges.dependencyId, otherFact.id))
       ).length,
     ).toBe(0);
   });
@@ -832,16 +1236,16 @@ describe("memory model REST service", () => {
       (
         await createDb(env.DB)
           .select()
-          .from(factSourceThoughts)
-          .where(eq(factSourceThoughts.thoughtId, ownThought.id))
+          .from(dependencyEdges)
+          .where(eq(dependencyEdges.dependencyId, ownThought.id))
       ).length,
     ).toBe(0);
     expect(
       (
         await createDb(env.DB)
           .select()
-          .from(factSourceFacts)
-          .where(eq(factSourceFacts.sourceFactId, otherFact.id))
+          .from(dependencyEdges)
+          .where(eq(dependencyEdges.dependencyId, otherFact.id))
       ).length,
     ).toBe(0);
   });
@@ -1304,6 +1708,11 @@ describe("memory model REST service", () => {
         "create_project",
         "list_projects",
         "link",
+        "create_dependency",
+        "delete_dependency",
+        "list_dependencies",
+        "mark_stale",
+        "list_stale",
       ]),
     );
   });
