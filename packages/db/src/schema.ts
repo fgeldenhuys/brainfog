@@ -6,10 +6,15 @@ export const users = sqliteTable(
   {
     id: text("id").primaryKey(),
     name: text("name").notNull(),
+    slug: text("slug").unique(),
+    isAdmin: integer("is_admin", { mode: "boolean" }).notNull().default(false),
     selfPersonId: text("self_person_id"),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
   },
-  (table) => [index("users_self_person_idx").on(table.selfPersonId)],
+  (table) => [
+    index("users_self_person_idx").on(table.selfPersonId),
+    index("users_slug_idx").on(table.slug),
+  ],
 );
 
 export const tokens = sqliteTable("tokens", {

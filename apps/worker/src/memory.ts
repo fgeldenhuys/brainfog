@@ -1609,3 +1609,18 @@ export async function getChunksForDocument(ctx: Ctx, documentId: string) {
     .from(documentChunks)
     .where(eq(documentChunks.documentId, documentId));
 }
+
+// Reserved slugs that would collide with route prefixes per ARCHITECTURE.md
+const reservedSlugs = new Set(["app", "api", "mcp", "assets", "admin", "system", "brainfog"]);
+
+export function validateSlug(slug: string | null | undefined): string | null {
+  if (!slug) return null;
+  const normalized = slug
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/^-+|-+$/g, "");
+  if (!normalized || reservedSlugs.has(normalized)) {
+    throw new MemoryError(400, `invalid or reserved slug: ${slug}`);
+  }
+  return normalized;
+}

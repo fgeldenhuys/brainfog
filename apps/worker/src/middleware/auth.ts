@@ -5,7 +5,7 @@ import type { MiddlewareHandler } from "hono";
 import type { Env } from "../env";
 
 export type AuthVariables = {
-  user: AuthenticatedUser;
+  user: AuthenticatedUser & { slug?: string | null; isAdmin: boolean };
 };
 
 /**
@@ -31,6 +31,8 @@ export const authMiddleware: MiddlewareHandler<{
       tokenId: tokens.id,
       userId: users.id,
       name: users.name,
+      slug: users.slug,
+      isAdmin: users.isAdmin,
       selfPersonId: users.selfPersonId,
     })
     .from(tokens)
@@ -51,6 +53,12 @@ export const authMiddleware: MiddlewareHandler<{
       .then(() => undefined),
   );
 
-  c.set("user", { id: row.userId, name: row.name, selfPersonId: row.selfPersonId });
+  c.set("user", {
+    id: row.userId,
+    name: row.name,
+    slug: row.slug,
+    isAdmin: row.isAdmin,
+    selfPersonId: row.selfPersonId,
+  });
   await next();
 };

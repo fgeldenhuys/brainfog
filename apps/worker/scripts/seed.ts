@@ -25,10 +25,17 @@ const tokenId = randomUUID();
 const token = generateToken();
 const tokenHash = await hashToken(token, secret);
 
+// Generate a URL-safe slug from the name
+const slug = name
+  .toLowerCase()
+  .replace(/[^a-z0-9]+/g, "-")
+  .replace(/^-+|-+$/g, "")
+  .slice(0, 50);
+
 const escapeSql = (value: string) => value.replace(/'/g, "''");
 
 const sql = [
-  `INSERT INTO users (id, name) VALUES ('${escapeSql(userId)}', '${escapeSql(name)}')`,
+  `INSERT INTO users (id, name, slug, is_admin) VALUES ('${escapeSql(userId)}', '${escapeSql(name)}', '${escapeSql(slug)}', 1)`,
   `INSERT INTO tokens (id, user_id, token_hash) VALUES ('${escapeSql(tokenId)}', '${escapeSql(userId)}', '${escapeSql(tokenHash)}')`,
 ].join("; ");
 
