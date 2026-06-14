@@ -3,11 +3,13 @@ import type { Env } from "./env";
 import { BrainfogMCP } from "./mcp";
 import { type AuthVariables, authMiddleware } from "./middleware/auth";
 import { apiRoutes } from "./routes/api";
+import { uiApiRoutes } from "./routes/ui-api";
 import { uiRoutes } from "./ui";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
 app.route("/api/v1", apiRoutes);
+app.route("/api/v1/ui", uiApiRoutes);
 
 // MCP scaffold (ADR-003), behind the same bearer-token middleware as
 // /api/v1 (ARCHITECTURE.md invariant 6). Auth middleware is registered

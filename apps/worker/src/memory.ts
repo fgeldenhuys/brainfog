@@ -9,12 +9,20 @@ import {
   tasks,
   thoughts,
   timeSeriesPoints,
+  tokens,
   users,
 } from "@brainfog/db";
-import { and, desc, eq, gte, inArray, isNotNull, lte, or, sql } from "drizzle-orm";
+import { generateToken, hashToken } from "@brainfog/shared";
+import { and, desc, eq, gte, inArray, isNotNull, lte, or, type SQL, sql } from "drizzle-orm";
 import type { Env } from "./env";
 
-export type MemoryUser = { id: string; name: string; selfPersonId?: string | null };
+export type MemoryUser = {
+  id: string;
+  name: string;
+  selfPersonId?: string | null;
+  slug?: string | null;
+  isAdmin?: boolean;
+};
 type Ctx = { env: Env; user: MemoryUser; source?: string };
 
 const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
@@ -31,7 +39,7 @@ const suffix = {
   dependencyEdge: "e",
 } as const;
 
-const graphKinds = [
+export const graphKinds = [
   "project",
   "person",
   "task",
@@ -51,8 +59,8 @@ const relationships = [
   "related_to",
 ] as const;
 const staleRelationships = ["derived_from", "summarizes", "supersedes", "observes_subject"];
-type GraphKind = (typeof graphKinds)[number];
-type Relationship = (typeof relationships)[number];
+export type GraphKind = (typeof graphKinds)[number];
+export type Relationship = (typeof relationships)[number];
 
 export class MemoryError extends Error {
   constructor(
@@ -1623,4 +1631,838 @@ export function validateSlug(slug: string | null | undefined): string | null {
     throw new MemoryError(400, `invalid or reserved slug: ${slug}`);
   }
   return normalized;
+}
+
+// ---------------------------------------------------------------------------
+// Data browser (PBI-006): kind mapping, generic browse/detail queries,
+// dependency-graph enrichment for detail pages, summary/metrics rollups, and
+// admin user/token management.
+// ---------------------------------------------------------------------------
+
+export const BROWSER_KINDS = [
+  "projects",
+  "people",
+  "tasks",
+  "facts",
+  "documents",
+  "thoughts",
+  "time-series-points",
+] as const;
+export type BrowserKind = (typeof BROWSER_KINDS)[number];
+
+export function isBrowserKind(value: string): value is BrowserKind {
+  return (BROWSER_KINDS as readonly string[]).includes(value);
+}
+
+export const browserToGraphKind: Record<BrowserKind, GraphKind> = {
+  projects: "project",
+  people: "person",
+  tasks: "task",
+  facts: "fact",
+  documents: "document",
+  thoughts: "thought",
+  "time-series-points": "time_series_point",
+};
+
+const graphToBrowserKind: Partial<Record<GraphKind, BrowserKind>> = {
+  project: "projects",
+  person: "people",
+  task: "tasks",
+  fact: "facts",
+  document: "documents",
+  thought: "thoughts",
+  time_series_point: "time-series-points",
+};
+
+/** URL of an entity within `/app`, or `null` for kinds with no detail page (document chunks). */
+export function entityHref(kind: GraphKind, id: string): string | null {
+  if (kind === "document") return `/app/documents/${id}`;
+  const browserKind = graphToBrowserKind[kind];
+  return browserKind ? `/app/browser/${browserKind}/${id}` : null;
+}
+
+function truncateLabel(text: string, max = 80): string {
+  const trimmed = text.replace(/\s+/g, " ").trim();
+  return trimmed.length > max ? `${trimmed.slice(0, max - 1)}…` : trimmed;
+}
+
+/** Human-readable label for a graph entity, used when rendering dependency edges. */
+export async function labelForEntity(ctx: Ctx, kind: GraphKind, id: string): Promise<string> {
+  const db = createDb(ctx.env.DB);
+  const ownerId = ctx.user.id;
+  switch (kind) {
+    case "project": {
+      const row = (
+        await db
+          .select({ v: projects.name })
+          .from(projects)
+          .where(and(eq(projects.id, id), eq(projects.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row?.v ?? id;
+    }
+    case "person": {
+      const row = (
+        await db
+          .select({ v: people.name })
+          .from(people)
+          .where(and(eq(people.id, id), eq(people.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row?.v ?? id;
+    }
+    case "task": {
+      const row = (
+        await db
+          .select({ v: tasks.title })
+          .from(tasks)
+          .where(and(eq(tasks.id, id), eq(tasks.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row?.v ?? id;
+    }
+    case "fact": {
+      const row = (
+        await db
+          .select({ v: facts.statement })
+          .from(facts)
+          .where(and(eq(facts.id, id), eq(facts.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row ? truncateLabel(row.v) : id;
+    }
+    case "thought": {
+      const row = (
+        await db
+          .select({ v: thoughts.content })
+          .from(thoughts)
+          .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row ? truncateLabel(row.v) : id;
+    }
+    case "document": {
+      const row = (
+        await db
+          .select({ v: documents.title })
+          .from(documents)
+          .where(and(eq(documents.id, id), eq(documents.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row?.v ?? id;
+    }
+    case "document_chunk": {
+      const row = (
+        await db
+          .select({ v: documentChunks.content })
+          .from(documentChunks)
+          .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+          .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row ? truncateLabel(row.v) : id;
+    }
+    case "time_series_point": {
+      const row = (
+        await db
+          .select({ v: timeSeriesPoints.seriesKey })
+          .from(timeSeriesPoints)
+          .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      return row?.v ?? id;
+    }
+  }
+}
+
+/** Combines filters with AND, falling back to an always-true clause for the (unreachable) empty case. */
+function whereAll(filters: SQL<unknown>[]): SQL<unknown> {
+  return and(...filters) ?? sql`1=1`;
+}
+
+const DEFAULT_PER_PAGE = 20;
+const MAX_PER_PAGE = 100;
+
+export type BrowseQuery = {
+  page?: number;
+  per_page?: number;
+  project_id?: string;
+  status?: string;
+  q?: string;
+  from?: string;
+  to?: string;
+};
+
+export type BrowsePage<T> = { rows: T[]; total: number; page: number; per_page: number };
+
+function pagination(q: BrowseQuery) {
+  const page = q.page && q.page > 0 ? Math.floor(q.page) : 1;
+  const perPage =
+    q.per_page && q.per_page > 0
+      ? Math.min(Math.floor(q.per_page), MAX_PER_PAGE)
+      : DEFAULT_PER_PAGE;
+  return { page, perPage, offset: (page - 1) * perPage };
+}
+
+/** Paginated, filtered list for `/app/browser/:kind` and `/api/v1/ui/...` (owner-scoped). */
+export async function browseEntities(
+  ctx: Ctx,
+  kind: BrowserKind,
+  q: BrowseQuery,
+): Promise<BrowsePage<Record<string, unknown>>> {
+  if (q.project_id) await ensureProject(ctx, q.project_id);
+  const { page, perPage, offset } = pagination(q);
+  const db = createDb(ctx.env.DB);
+  const ownerId = ctx.user.id;
+
+  switch (kind) {
+    case "projects": {
+      const filters: SQL<unknown>[] = [eq(projects.ownerId, ownerId)];
+      if (q.q) filters.push(sql`${projects.name} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(projects)
+          .where(where)
+          .orderBy(projects.name)
+          .limit(perPage)
+          .offset(offset),
+        db.$count(projects, where),
+      ]);
+      return { rows, total, page, per_page: perPage };
+    }
+    case "people": {
+      const filters: SQL<unknown>[] = [eq(people.ownerId, ownerId)];
+      if (q.q) filters.push(sql`${people.name} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db.select().from(people).where(where).orderBy(people.name).limit(perPage).offset(offset),
+        db.$count(people, where),
+      ]);
+      return { rows, total, page, per_page: perPage };
+    }
+    case "tasks": {
+      const filters: SQL<unknown>[] = [eq(tasks.ownerId, ownerId)];
+      if (q.project_id) filters.push(eq(tasks.projectId, q.project_id));
+      if (q.status) filters.push(eq(tasks.status, q.status));
+      if (q.q) filters.push(sql`${tasks.title} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(tasks)
+          .where(where)
+          .orderBy(desc(tasks.createdAt))
+          .limit(perPage)
+          .offset(offset),
+        db.$count(tasks, where),
+      ]);
+      return { rows, total, page, per_page: perPage };
+    }
+    case "facts": {
+      const filters: SQL<unknown>[] = [eq(facts.ownerId, ownerId)];
+      if (q.project_id) filters.push(eq(facts.projectId, q.project_id));
+      if (q.status) filters.push(eq(facts.status, q.status));
+      if (q.q) filters.push(sql`${facts.statement} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(facts)
+          .where(where)
+          .orderBy(desc(facts.createdAt))
+          .limit(perPage)
+          .offset(offset),
+        db.$count(facts, where),
+      ]);
+      const enriched = await Promise.all(rows.map((row) => factWithSupersession(ctx, row)));
+      return { rows: enriched, total, page, per_page: perPage };
+    }
+    case "thoughts": {
+      const filters: SQL<unknown>[] = [eq(thoughts.ownerId, ownerId)];
+      if (q.project_id) filters.push(eq(thoughts.projectId, q.project_id));
+      if (q.q) filters.push(sql`${thoughts.content} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(thoughts)
+          .where(where)
+          .orderBy(desc(thoughts.createdAt))
+          .limit(perPage)
+          .offset(offset),
+        db.$count(thoughts, where),
+      ]);
+      return { rows, total, page, per_page: perPage };
+    }
+    case "documents": {
+      const filters: SQL<unknown>[] = [eq(documents.ownerId, ownerId)];
+      if (q.project_id) filters.push(eq(documents.projectId, q.project_id));
+      if (q.q) filters.push(sql`${documents.title} like ${`%${q.q}%`}`);
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(documents)
+          .where(where)
+          .orderBy(desc(documents.createdAt))
+          .limit(perPage)
+          .offset(offset),
+        db.$count(documents, where),
+      ]);
+      const ids = rows.map((r) => r.id);
+      const chunkCounts = ids.length
+        ? await db
+            .select({ documentId: documentChunks.documentId, count: sql<number>`count(*)` })
+            .from(documentChunks)
+            .where(inArray(documentChunks.documentId, ids))
+            .groupBy(documentChunks.documentId)
+        : [];
+      const countMap = new Map(chunkCounts.map((c) => [c.documentId, Number(c.count)]));
+      return {
+        rows: rows.map((r) => ({ ...r, chunkCount: countMap.get(r.id) ?? 0 })),
+        total,
+        page,
+        per_page: perPage,
+      };
+    }
+    case "time-series-points": {
+      const filters: SQL<unknown>[] = [eq(timeSeriesPoints.ownerId, ownerId)];
+      if (q.project_id) filters.push(eq(timeSeriesPoints.projectId, q.project_id));
+      if (q.q) filters.push(sql`${timeSeriesPoints.seriesKey} like ${`%${q.q}%`}`);
+      if (q.from) filters.push(gte(timeSeriesPoints.observedAt, asDate(Number(q.from)) ?? now()));
+      if (q.to) filters.push(lte(timeSeriesPoints.observedAt, asDate(Number(q.to)) ?? now()));
+      const where = whereAll(filters);
+      const [rows, total] = await Promise.all([
+        db
+          .select()
+          .from(timeSeriesPoints)
+          .where(where)
+          .orderBy(desc(timeSeriesPoints.observedAt))
+          .limit(perPage)
+          .offset(offset),
+        db.$count(timeSeriesPoints, where),
+      ]);
+      return { rows, total, page, per_page: perPage };
+    }
+  }
+}
+
+/** Owner-scoped detail fetch for `/app/browser/:kind/:id`. */
+export async function getEntity(
+  ctx: Ctx,
+  kind: BrowserKind,
+  id: string,
+): Promise<Record<string, unknown>> {
+  const db = createDb(ctx.env.DB);
+  const ownerId = ctx.user.id;
+  switch (kind) {
+    case "projects": {
+      const row = (
+        await db
+          .select()
+          .from(projects)
+          .where(and(eq(projects.id, id), eq(projects.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "project not found");
+      return row;
+    }
+    case "people": {
+      const row = (
+        await db
+          .select()
+          .from(people)
+          .where(and(eq(people.id, id), eq(people.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "person not found");
+      return row;
+    }
+    case "tasks": {
+      const row = (
+        await db
+          .select()
+          .from(tasks)
+          .where(and(eq(tasks.id, id), eq(tasks.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "task not found");
+      return row;
+    }
+    case "facts": {
+      const row = (
+        await db
+          .select()
+          .from(facts)
+          .where(and(eq(facts.id, id), eq(facts.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "fact not found");
+      return factWithSupersession(ctx, row);
+    }
+    case "thoughts": {
+      const row = (
+        await db
+          .select()
+          .from(thoughts)
+          .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "thought not found");
+      return row;
+    }
+    case "documents": {
+      const row = (
+        await db
+          .select()
+          .from(documents)
+          .where(and(eq(documents.id, id), eq(documents.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "document not found");
+      const chunkCount = await db.$count(documentChunks, eq(documentChunks.documentId, id));
+      return { ...row, chunkCount };
+    }
+    case "time-series-points": {
+      const row = (
+        await db
+          .select()
+          .from(timeSeriesPoints)
+          .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ownerId)))
+          .limit(1)
+      )[0];
+      if (!row) throw new MemoryError(404, "time series point not found");
+      return row;
+    }
+  }
+}
+
+export type EnrichedDependency = {
+  id: string;
+  relationship: Relationship;
+  /** "out": this entity points at `other`; "in": `other` points at this entity. */
+  direction: "out" | "in";
+  otherKind: GraphKind;
+  otherId: string;
+  otherLabel: string;
+  otherHref: string | null;
+  staleAt: Date | null;
+  staleReason: string | null;
+};
+
+/** Dependency-graph edges touching an entity, enriched with labels/links for detail pages. */
+export async function getEntityRelations(
+  ctx: Ctx,
+  kind: BrowserKind,
+  id: string,
+): Promise<EnrichedDependency[]> {
+  const graphKind = browserToGraphKind[kind];
+  const edges = await listDependencies(ctx, {
+    entity_kind: graphKind,
+    entity_id: id,
+    direction: "both",
+  });
+  return Promise.all(
+    edges.map(async (edge) => {
+      const isDependent = edge.dependentKind === graphKind && edge.dependentId === id;
+      const otherKind = (isDependent ? edge.dependencyKind : edge.dependentKind) as GraphKind;
+      const otherId = isDependent ? edge.dependencyId : edge.dependentId;
+      return {
+        id: edge.id,
+        relationship: edge.relationship as Relationship,
+        direction: isDependent ? "out" : "in",
+        otherKind,
+        otherId,
+        otherLabel: await labelForEntity(ctx, otherKind, otherId),
+        otherHref: entityHref(otherKind, otherId),
+        staleAt: edge.staleAt,
+        staleReason: edge.staleReason,
+      } satisfies EnrichedDependency;
+    }),
+  );
+}
+
+const RECENT_ACTIVITY_LIMIT = 10;
+
+async function getRecentActivity(ctx: Ctx, limit: number, projectId?: string) {
+  const db = createDb(ctx.env.DB);
+  const ownerId = ctx.user.id;
+
+  const [thoughtRows, factRows, taskRows, documentRows] = await Promise.all([
+    db
+      .select({ id: thoughts.id, label: thoughts.content, createdAt: thoughts.createdAt })
+      .from(thoughts)
+      .where(
+        whereAll(
+          projectId
+            ? [eq(thoughts.ownerId, ownerId), eq(thoughts.projectId, projectId)]
+            : [eq(thoughts.ownerId, ownerId)],
+        ),
+      )
+      .orderBy(desc(thoughts.createdAt))
+      .limit(limit),
+    db
+      .select({ id: facts.id, label: facts.statement, createdAt: facts.createdAt })
+      .from(facts)
+      .where(
+        whereAll(
+          projectId
+            ? [eq(facts.ownerId, ownerId), eq(facts.projectId, projectId)]
+            : [eq(facts.ownerId, ownerId)],
+        ),
+      )
+      .orderBy(desc(facts.createdAt))
+      .limit(limit),
+    db
+      .select({ id: tasks.id, label: tasks.title, createdAt: tasks.createdAt })
+      .from(tasks)
+      .where(
+        whereAll(
+          projectId
+            ? [eq(tasks.ownerId, ownerId), eq(tasks.projectId, projectId)]
+            : [eq(tasks.ownerId, ownerId)],
+        ),
+      )
+      .orderBy(desc(tasks.createdAt))
+      .limit(limit),
+    db
+      .select({ id: documents.id, label: documents.title, createdAt: documents.createdAt })
+      .from(documents)
+      .where(
+        whereAll(
+          projectId
+            ? [eq(documents.ownerId, ownerId), eq(documents.projectId, projectId)]
+            : [eq(documents.ownerId, ownerId)],
+        ),
+      )
+      .orderBy(desc(documents.createdAt))
+      .limit(limit),
+  ]);
+
+  const merged = [
+    ...thoughtRows.map((r) => ({
+      kind: "thought" as const,
+      id: r.id,
+      label: truncateLabel(r.label),
+      createdAt: r.createdAt,
+    })),
+    ...factRows.map((r) => ({
+      kind: "fact" as const,
+      id: r.id,
+      label: truncateLabel(r.label),
+      createdAt: r.createdAt,
+    })),
+    ...taskRows.map((r) => ({
+      kind: "task" as const,
+      id: r.id,
+      label: r.label,
+      createdAt: r.createdAt,
+    })),
+    ...documentRows.map((r) => ({
+      kind: "document" as const,
+      id: r.id,
+      label: r.label,
+      createdAt: r.createdAt,
+    })),
+  ];
+  merged.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  return merged.slice(0, limit).map((r) => ({
+    kind: r.kind,
+    id: r.id,
+    label: r.label,
+    href: entityHref(r.kind, r.id),
+    created_at: r.createdAt,
+  }));
+}
+
+export type MetricsQuery = { project_id?: string; from?: string; to?: string };
+
+const MAX_SERIES_POINTS = 50;
+
+/** Entity counts, status breakdowns, recent activity, and time-series rollups for `/app/metrics`. */
+export async function getMetrics(ctx: Ctx, q: MetricsQuery) {
+  if (q.project_id) await ensureProject(ctx, q.project_id);
+  const db = createDb(ctx.env.DB);
+  const ownerId = ctx.user.id;
+  const projectId = q.project_id;
+  const fromDate = q.from ? asDate(Number(q.from)) : undefined;
+  const toDate = q.to ? asDate(Number(q.to)) : undefined;
+
+  const counts = {
+    projects: projectId ? 1 : await db.$count(projects, eq(projects.ownerId, ownerId)),
+    people: await db.$count(people, eq(people.ownerId, ownerId)),
+    tasks: await db.$count(
+      tasks,
+      whereAll(
+        projectId
+          ? [eq(tasks.ownerId, ownerId), eq(tasks.projectId, projectId)]
+          : [eq(tasks.ownerId, ownerId)],
+      ),
+    ),
+    facts: await db.$count(
+      facts,
+      whereAll(
+        projectId
+          ? [eq(facts.ownerId, ownerId), eq(facts.projectId, projectId)]
+          : [eq(facts.ownerId, ownerId)],
+      ),
+    ),
+    documents: await db.$count(
+      documents,
+      whereAll(
+        projectId
+          ? [eq(documents.ownerId, ownerId), eq(documents.projectId, projectId)]
+          : [eq(documents.ownerId, ownerId)],
+      ),
+    ),
+    thoughts: await db.$count(
+      thoughts,
+      whereAll(
+        projectId
+          ? [eq(thoughts.ownerId, ownerId), eq(thoughts.projectId, projectId)]
+          : [eq(thoughts.ownerId, ownerId)],
+      ),
+    ),
+    time_series_points: await db.$count(
+      timeSeriesPoints,
+      whereAll(
+        projectId
+          ? [eq(timeSeriesPoints.ownerId, ownerId), eq(timeSeriesPoints.projectId, projectId)]
+          : [eq(timeSeriesPoints.ownerId, ownerId)],
+      ),
+    ),
+  };
+
+  const taskStatusRows = await db
+    .select({ status: tasks.status, count: sql<number>`count(*)` })
+    .from(tasks)
+    .where(
+      whereAll(
+        projectId
+          ? [eq(tasks.ownerId, ownerId), eq(tasks.projectId, projectId)]
+          : [eq(tasks.ownerId, ownerId)],
+      ),
+    )
+    .groupBy(tasks.status);
+  const factStatusRows = await db
+    .select({ status: facts.status, count: sql<number>`count(*)` })
+    .from(facts)
+    .where(
+      whereAll(
+        projectId
+          ? [eq(facts.ownerId, ownerId), eq(facts.projectId, projectId)]
+          : [eq(facts.ownerId, ownerId)],
+      ),
+    )
+    .groupBy(facts.status);
+
+  const chunkCountRows = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(documentChunks)
+    .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+    .where(
+      whereAll(
+        projectId
+          ? [eq(documents.ownerId, ownerId), eq(documents.projectId, projectId)]
+          : [eq(documents.ownerId, ownerId)],
+      ),
+    );
+  const chunkCount = Number(chunkCountRows[0]?.count ?? 0);
+
+  const tspFilters: SQL<unknown>[] = [eq(timeSeriesPoints.ownerId, ownerId)];
+  if (projectId) tspFilters.push(eq(timeSeriesPoints.projectId, projectId));
+  if (fromDate) tspFilters.push(gte(timeSeriesPoints.observedAt, fromDate));
+  if (toDate) tspFilters.push(lte(timeSeriesPoints.observedAt, toDate));
+  const tspRows = await db
+    .select()
+    .from(timeSeriesPoints)
+    .where(whereAll(tspFilters))
+    .orderBy(timeSeriesPoints.observedAt);
+
+  const seriesMap = new Map<string, (typeof tspRows)[number][]>();
+  for (const row of tspRows) {
+    const list = seriesMap.get(row.seriesKey) ?? [];
+    list.push(row);
+    seriesMap.set(row.seriesKey, list);
+  }
+  const timeSeries = Array.from(seriesMap.entries()).map(([seriesKey, points]) => {
+    const values = points.map((p) => p.value).filter((v): v is number => v !== null);
+    const latest = points[points.length - 1];
+    return {
+      series_key: seriesKey,
+      unit: latest?.unit ?? null,
+      count: points.length,
+      min: values.length ? Math.min(...values) : null,
+      max: values.length ? Math.max(...values) : null,
+      avg: values.length ? values.reduce((sum, v) => sum + v, 0) / values.length : null,
+      latest_value: latest?.value ?? null,
+      latest_observed_at: latest?.observedAt ?? null,
+      points: points
+        .slice(-MAX_SERIES_POINTS)
+        .map((p) => ({ observed_at: p.observedAt, value: p.value })),
+    };
+  });
+
+  return {
+    project_id: projectId ?? null,
+    from: fromDate ?? null,
+    to: toDate ?? null,
+    counts,
+    task_status: Object.fromEntries(taskStatusRows.map((r) => [r.status, Number(r.count)])),
+    fact_status: Object.fromEntries(factStatusRows.map((r) => [r.status, Number(r.count)])),
+    chunks: chunkCount,
+    recallable: counts.thoughts + counts.facts + chunkCount,
+    recent: await getRecentActivity(ctx, RECENT_ACTIVITY_LIMIT, projectId),
+    time_series: timeSeries,
+  };
+}
+
+/** Lightweight overview for `/app` and `/api/v1/ui/summary`. */
+export async function getSummary(ctx: Ctx) {
+  const metrics = await getMetrics(ctx, {});
+  return {
+    counts: metrics.counts,
+    task_status: metrics.task_status,
+    fact_status: metrics.fact_status,
+    chunks: metrics.chunks,
+    recallable: metrics.recallable,
+    recent: metrics.recent,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Admin user/token management (`/api/v1/ui/users*`, `/api/v1/ui/tokens/:id`).
+// Every export here except `listUserTokens` requires `ctx.user.isAdmin`;
+// `/app/users` returns 403 for non-admins per the Contract.
+// ---------------------------------------------------------------------------
+
+function requireAdmin(ctx: Ctx) {
+  if (!ctx.user.isAdmin) throw new MemoryError(403, "admin required");
+}
+
+async function ensureSlugAvailable(ctx: Ctx, slug: string, excludeUserId?: string) {
+  const existing = (
+    await createDb(ctx.env.DB)
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.slug, slug))
+      .limit(1)
+  )[0];
+  if (existing && existing.id !== excludeUserId) throw new MemoryError(409, "slug already in use");
+}
+
+export type AdminUserRow = {
+  id: string;
+  name: string;
+  slug: string | null;
+  isAdmin: boolean;
+  createdAt: Date;
+  tokenCount: number;
+};
+
+export async function listUsers(ctx: Ctx): Promise<AdminUserRow[]> {
+  requireAdmin(ctx);
+  const db = createDb(ctx.env.DB);
+  const rows = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      slug: users.slug,
+      isAdmin: users.isAdmin,
+      createdAt: users.createdAt,
+    })
+    .from(users)
+    .orderBy(users.name);
+  const tokenCounts = await db
+    .select({ userId: tokens.userId, count: sql<number>`count(*)` })
+    .from(tokens)
+    .groupBy(tokens.userId);
+  const countMap = new Map(tokenCounts.map((t) => [t.userId, Number(t.count)]));
+  return rows.map((row) => ({ ...row, tokenCount: countMap.get(row.id) ?? 0 }));
+}
+
+export async function createUser(
+  ctx: Ctx,
+  input: { name: string; slug?: string | null; is_admin?: boolean },
+) {
+  requireAdmin(ctx);
+  const name = (input.name ?? "").trim();
+  if (!name) throw new MemoryError(400, "missing name");
+  const slug = validateSlug(input.slug ?? null);
+  if (slug) await ensureSlugAvailable(ctx, slug);
+  const row = {
+    id: crypto.randomUUID(),
+    name,
+    slug,
+    isAdmin: Boolean(input.is_admin),
+  };
+  await createDb(ctx.env.DB).insert(users).values(row);
+  return row;
+}
+
+export async function updateUser(
+  ctx: Ctx,
+  id: string,
+  input: { name?: string; slug?: string | null; is_admin?: boolean },
+) {
+  requireAdmin(ctx);
+  const db = createDb(ctx.env.DB);
+  const row = (await db.select().from(users).where(eq(users.id, id)).limit(1))[0];
+  if (!row) throw new MemoryError(404, "user not found");
+  let slug = row.slug;
+  if (Object.hasOwn(input, "slug")) {
+    slug = validateSlug(input.slug ?? null);
+    if (slug) await ensureSlugAvailable(ctx, slug, id);
+  }
+  const name = input.name !== undefined ? input.name.trim() : row.name;
+  if (!name) throw new MemoryError(400, "name cannot be empty");
+  const isAdmin = input.is_admin === undefined ? row.isAdmin : Boolean(input.is_admin);
+  await db.update(users).set({ name, slug, isAdmin }).where(eq(users.id, id));
+  return { id: row.id, name, slug, isAdmin, createdAt: row.createdAt };
+}
+
+/** Issues a one-time bearer token for `userId`; the plaintext is returned only here. */
+export async function createUserToken(ctx: Ctx, userId: string) {
+  requireAdmin(ctx);
+  const db = createDb(ctx.env.DB);
+  const target = (
+    await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1)
+  )[0];
+  if (!target) throw new MemoryError(404, "user not found");
+  const token = generateToken();
+  const tokenHash = await hashToken(token, ctx.env.BRAINFOG_TOKEN_HASH_SECRET);
+  const id = crypto.randomUUID();
+  const createdAt = now();
+  await db.insert(tokens).values({ id, userId, tokenHash, createdAt });
+  return { id, token, created_at: createdAt };
+}
+
+export type TokenRow = { id: string; createdAt: Date; lastUsedAt: Date | null };
+
+/** Token metadata (never hashes/plaintext) for a user; self-access allowed for "view own tokens". */
+export async function listUserTokens(ctx: Ctx, userId: string): Promise<TokenRow[]> {
+  if (!ctx.user.isAdmin && ctx.user.id !== userId) throw new MemoryError(403, "admin required");
+  const db = createDb(ctx.env.DB);
+  const target = (
+    await db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1)
+  )[0];
+  if (!target) throw new MemoryError(404, "user not found");
+  return db
+    .select({ id: tokens.id, createdAt: tokens.createdAt, lastUsedAt: tokens.lastUsedAt })
+    .from(tokens)
+    .where(eq(tokens.userId, userId))
+    .orderBy(desc(tokens.createdAt));
+}
+
+export async function revokeToken(ctx: Ctx, tokenId: string) {
+  requireAdmin(ctx);
+  const db = createDb(ctx.env.DB);
+  const row = (
+    await db.select({ id: tokens.id }).from(tokens).where(eq(tokens.id, tokenId)).limit(1)
+  )[0];
+  if (!row) throw new MemoryError(404, "token not found");
+  await db.delete(tokens).where(eq(tokens.id, tokenId));
+  return { ok: true };
 }

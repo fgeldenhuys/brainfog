@@ -62,7 +62,7 @@ function renderInline(text: string): string {
 
     // Link [text](url)
     const linkMatch = text.substring(i).match(/^\[([^\]]+)\]\(([^)]+)\)/);
-    if (linkMatch && linkMatch[1] && linkMatch[2]) {
+    if (linkMatch?.[1] && linkMatch[2]) {
       const linkText = linkMatch[1];
       const url = linkMatch[2];
       if (isSafeUrl(url)) {
@@ -118,7 +118,7 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
 
     // Headings
     const headingMatch = trimmed.match(/^(#+)\s+(.+)$/);
-    if (headingMatch && headingMatch[1] && headingMatch[2]) {
+    if (headingMatch?.[1] && headingMatch[2]) {
       blocks.push({
         type: "heading",
         level: headingMatch[1].length,
@@ -151,7 +151,7 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
       const quoteLines: string[] = [];
       while (i < lines.length) {
         const currentLine = lines[i];
-        if (!currentLine || !currentLine.trim().startsWith("> ")) break;
+        if (!currentLine?.trim().startsWith("> ")) break;
         const quoted = currentLine.trim().substring(2);
         quoteLines.push(quoted);
         i++;
@@ -219,7 +219,7 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
       // Body
       while (i < lines.length) {
         const currentLine = lines[i];
-        if (!currentLine || !currentLine.includes("|")) break;
+        if (!currentLine?.includes("|")) break;
         rows.push({
           cells: currentLine
             .split("|")
@@ -240,11 +240,7 @@ function parseBlocks(markdown: string): MarkdownBlock[] {
     i++;
     while (i < lines.length) {
       const currentLine = lines[i];
-      if (
-        !currentLine ||
-        !currentLine.trim() ||
-        currentLine.match(/^(#+\s|```|>\s|[*-]\s|\d+\.\s)/)
-      ) {
+      if (!currentLine?.trim() || currentLine.match(/^(#+\s|```|>\s|[*-]\s|\d+\.\s)/)) {
         break;
       }
       paraLines.push(currentLine);

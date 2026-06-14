@@ -98,21 +98,23 @@ PBI-006 (`tasks/PBI-006-frontend-default-ui.md`) implements this spec after PBI-
 
 ### Definition Of Done
 
-- [ ] The web UI has a shared authenticated layout at `/app` with navigation to Browser, Metrics, and Users.
-- [ ] `/` still supports the existing token-entry flow and authenticated requests are redirected or linked to `/app`.
-- [ ] Data browser pages exist for `projects`, `thoughts`, `facts`, `tasks`, `people`, `documents`, and `time-series-points`, with owner-scoped lists, filters, pagination, and row detail pages.
-- [ ] Detail views display provenance and relevant relationships without leaking rows owned by another user.
-- [ ] `/app/browser/documents` shows owned documents with metadata and links to rendered document reader pages.
-- [ ] `/app/documents/:id` renders owned Markdown documents as safe HTML from R2 content, renders non-Markdown text as escaped plaintext, and shows dependency graph relationships/staleness for generated documents where present.
-- [ ] `/app/documents/:id/raw` returns raw document text only for the authenticated owner.
-- [ ] Markdown rendering escapes or strips raw HTML, event handlers, scripts, unsafe URLs, and active external content.
-- [ ] Recall search is available from the UI and uses the existing owner-scoped recall service.
-- [ ] Metrics dashboard renders entity counts, task status counts, fact status counts, document/chunk counts, recent activity, and selected time-series rollups, filterable by project/time range.
-- [ ] `users.slug` and `users.is_admin` are added by Drizzle migration, with reserved slug validation in the service layer.
-- [ ] Admin-only user management can list/create/update users, issue one-time plaintext tokens, and revoke tokens; non-admin requests receive `403`.
-- [ ] htmx-backed interactions degrade to normal HTML links/forms when JavaScript is unavailable.
-- [ ] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for auth/authorization, document rendering safety, owner-scoped document access, admin-only user management, and data-browser/metrics service outputs.
-- [ ] `pnpm test:e2e` covers login, navigating the data browser, opening a rendered Markdown document, viewing metrics, and user-management authorization behavior.
+- [x] The web UI has a shared authenticated layout at `/app` with navigation to Browser, Metrics, and Users.
+- [x] `/` still supports the existing token-entry flow and authenticated requests are redirected or linked to `/app`.
+- [x] Data browser pages exist for `projects`, `thoughts`, `facts`, `tasks`, `people`, `documents`, and `time-series-points`, with owner-scoped lists, filters, pagination, and row detail pages.
+- [x] Detail views display provenance and relevant relationships without leaking rows owned by another user.
+- [x] `/app/browser/documents` shows owned documents with metadata and links to rendered document reader pages.
+- [x] `/app/documents/:id` renders owned Markdown documents as safe HTML from R2 content, renders non-Markdown text as escaped plaintext, and shows dependency graph relationships/staleness for generated documents where present.
+- [x] `/app/documents/:id/raw` returns raw document text only for the authenticated owner.
+- [x] Markdown rendering escapes or strips raw HTML, event handlers, scripts, unsafe URLs, and active external content.
+- [x] Recall search is available from the UI and uses the existing owner-scoped recall service.
+- [x] Metrics dashboard renders entity counts, task status counts, fact status counts, document/chunk counts, recent activity, and selected time-series rollups, filterable by project/time range.
+- [x] `users.slug` and `users.is_admin` are added by Drizzle migration, with reserved slug validation in the service layer.
+- [x] Admin-only user management can list/create/update users, issue one-time plaintext tokens, and revoke tokens; non-admin requests receive `403`.
+- [x] htmx-backed interactions degrade to normal HTML links/forms when JavaScript is unavailable.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for auth/authorization, document rendering safety, owner-scoped document access, admin-only user management, and data-browser/metrics service outputs.
+- [x] `pnpm test:e2e` covers login, navigating the data browser, opening a rendered Markdown document, viewing metrics, and user-management authorization behavior.
+
+Completion evidence: PBI-006 implementation added the authenticated `/app` Hono JSX shell, data browser, recall search, metrics dashboard, safe document reader/raw routes backed by owner-scoped R2 document services, admin user/token management, UI service REST routes under `/api/v1/ui/*`, `users.slug`/`users.is_admin` schema migration and seed updates, vendored htmx asset serving, Markdown safety rendering, Worker-runtime UI/API tests, and Playwright coverage for login, browser navigation, Markdown rendering, metrics, and user-management authorization. Verified on 2026-06-14 with `pnpm check && pnpm typecheck && pnpm test` (97/97 tests passed; known post-success Vitest close-timeout warning) and `pnpm test:e2e` (1/1 passed, run twice consecutively after idempotent setup fix). Critic review initially found blocking issues around plaintext token URLs, token metadata/revocation UI, non-admin POST handling, and e2e repeatability; focused re-review confirmed all four were resolved with no new blocking issues.
 
 ### Regression Guardrails
 

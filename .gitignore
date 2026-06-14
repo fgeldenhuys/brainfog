@@ -12,6 +12,7 @@ dist/
 .dev.vars
 .env
 .env.*
+.secrets
 
 # Test artifacts
 coverage/

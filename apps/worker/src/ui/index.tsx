@@ -1,120 +1,44 @@
-import { createDb, tokens, users } from "@brainfog/db";
-import { hashToken } from "@brainfog/shared";
-import { eq } from "drizzle-orm";
-import type { Context } from "hono";
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
+import { raw } from "hono/html";
 import type { FC } from "hono/jsx";
 import type { Env } from "../env";
-import { escapeHtml } from "../markdown";
-
-const TOKEN_COOKIE = "brainfog_token";
+import { escapeHtml, markdownToHtml } from "../markdown";
+import {
+  createUser,
+  createUserToken,
+  getDocumentContent,
+  getEntity,
+  getEntityRelations,
+  getMetrics,
+  getSummary,
+  listProjects,
+  listUsers,
+  listUserTokens,
+  MemoryError,
+  recall,
+  revokeToken,
+  updateUser,
+} from "../memory";
+import { assetRoutes } from "./assets";
+import { browserRoutes } from "./browser";
+import {
+  type AppContext,
+  type AppVariables,
+  findUserByToken,
+  fmtDate,
+  Layout,
+  memCtx,
+  Provenance,
+  RelationsList,
+  TOKEN_COOKIE,
+  type UserRow,
+} from "./layout";
 
 export const uiRoutes = new Hono<{ Bindings: Env }>();
 
-type UserRow = {
-  id: string;
-  name: string;
-  slug: string | null;
-  isAdmin: boolean;
-};
-
-async function findUserByToken(env: Env, token: string): Promise<UserRow | undefined> {
-  const tokenHash = await hashToken(token, env.BRAINFOG_TOKEN_HASH_SECRET);
-  const db = createDb(env.DB);
-  const rows = await db
-    .select({ id: users.id, name: users.name, slug: users.slug, isAdmin: users.isAdmin })
-    .from(tokens)
-    .innerJoin(users, eq(tokens.userId, users.id))
-    .where(eq(tokens.tokenHash, tokenHash))
-    .limit(1);
-  return rows[0];
-}
-
-const Layout: FC<{
-  user?: UserRow | null;
-  currentPath?: string;
-  children: unknown;
-}> = (props) => {
-  const navLink = (href: string, label: string) => {
-    const isActive = props.currentPath?.startsWith(href);
-    return (
-      <a
-        href={href}
-        style={{
-          padding: "0.5rem 1rem",
-          textDecoration: "none",
-          borderBottom: isActive ? "2px solid #333" : "none",
-          fontWeight: isActive ? "bold" : "normal",
-        }}
-      >
-        {label}
-      </a>
-    );
-  };
-
-  return (
-    <html lang="en">
-      <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <title>brainfog</title>
-        <style>{`
-          * { margin: 0; padding: 0; box-sizing: border-box; }
-          body { font-family: system-ui, sans-serif; background: #f5f5f5; }
-          header { background: white; border-bottom: 1px solid #ddd; padding: 1rem; }
-          header h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
-          nav { display: flex; gap: 0; border-top: 1px solid #eee; }
-          main { max-width: 1200px; margin: 0 auto; padding: 2rem 1rem; }
-          form { background: white; padding: 2rem; border-radius: 4px; max-width: 400px; }
-          input { width: 100%; padding: 0.75rem; margin: 0.5rem 0; border: 1px solid #ddd; border-radius: 4px; }
-          button { padding: 0.75rem 1.5rem; background: #333; color: white; border: none; border-radius: 4px; cursor: pointer; }
-          button:hover { background: #555; }
-          .error { color: #b00020; padding: 1rem; background: #ffe6e6; border-radius: 4px; margin-bottom: 1rem; }
-          table { width: 100%; border-collapse: collapse; background: white; }
-          th, td { padding: 0.75rem; text-align: left; border-bottom: 1px solid #ddd; }
-          th { background: #f5f5f5; font-weight: bold; }
-          a { color: #0066cc; text-decoration: none; }
-          a:hover { text-decoration: underline; }
-          code { background: #f5f5f5; padding: 0.2rem 0.4rem; border-radius: 2px; font-family: monospace; }
-          pre { background: #f5f5f5; padding: 1rem; border-radius: 4px; overflow-x: auto; }
-          blockquote { border-left: 4px solid #ddd; padding-left: 1rem; margin: 1rem 0; color: #666; }
-          .metadata { background: white; padding: 1rem; margin: 1rem 0; border-radius: 4px; font-size: 0.9rem; color: #666; }
-          .content { background: white; padding: 2rem; border-radius: 4px; line-height: 1.6; }
-          .content table { margin: 1rem 0; }
-          .content hr { margin: 1.5rem 0; }
-          .card { background: white; padding: 1.5rem; margin: 1rem 0; border-radius: 4px; border: 1px solid #eee; }
-          .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; }
-          .button-group { display: flex; gap: 0.5rem; margin-top: 1rem; }
-          .warning { color: #ff6600; }
-          .success { color: #008000; }
-        `}</style>
-      </head>
-      <body>
-        <header>
-          <h1>brainfog</h1>
-          {props.user ? (
-            <div style={{ fontSize: "0.9rem", color: "#666" }}>
-              Signed in as <strong>{props.user.name}</strong>
-            </div>
-          ) : null}
-        </header>
-        {props.user ? (
-          <nav>
-            {navLink("/app", "Home")}
-            {navLink("/app/browser", "Browser")}
-            {navLink("/app/metrics", "Metrics")}
-            {props.user.isAdmin ? navLink("/app/users", "Users") : null}
-          </nav>
-        ) : null}
-        <main>{props.children}</main>
-      </body>
-    </html>
-  );
-};
-
 const TokenForm: FC<{ error?: string }> = ({ error }) => (
-  <form method="post" action="/">
+  <form method="post" action="/" hx-boost="false">
     {error ? <p class="error">{error}</p> : null}
     <label htmlFor="token">Bearer token</label>
     <input type="password" id="token" name="token" required />
@@ -161,10 +85,11 @@ uiRoutes.post("/", async (c) => {
   return c.redirect("/app");
 });
 
-// Middleware to check authenticated cookie
-const appRoutes = new Hono<{ Bindings: Env; Variables: { user: UserRow } }>();
+// Mount assets publicly (no auth required)
+uiRoutes.route("/assets", assetRoutes);
 
-type AppContext = Context<{ Bindings: Env; Variables: { user: UserRow } }>;
+// Middleware to check authenticated cookie
+const appRoutes = new Hono<{ Bindings: Env; Variables: AppVariables }>();
 
 appRoutes.use("*", async (c: AppContext, next) => {
   const token = getCookie(c, TOKEN_COOKIE);
@@ -179,95 +104,64 @@ appRoutes.use("*", async (c: AppContext, next) => {
   await next();
 });
 
-// GET /app - App shell
-appRoutes.get("/", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
-  return c.html(
-    <Layout user={user} currentPath="/app">
-      <h2>Welcome, {user.name}</h2>
-      <p>Use the navigation above to browse data, view metrics, or manage users.</p>
-    </Layout>,
-  );
-});
+function errorStatus(status: number): 400 | 403 | 404 | 409 {
+  if (status === 403 || status === 404 || status === 409) return status;
+  return 400;
+}
 
-// GET /app/browser - Browser index
-appRoutes.get("/browser", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
-  const kinds = [
-    "projects",
-    "thoughts",
-    "facts",
-    "tasks",
-    "people",
-    "documents",
-    "time-series-points",
-  ];
-  return c.html(
-    <Layout user={user} currentPath="/app/browser">
-      <h2>Data Browser</h2>
-      <div class="grid">
-        {kinds.map((kind) => (
-          <div class="card">
-            <h3>
-              <a href={`/app/browser/${kind}`}>{kind}</a>
-            </h3>
-            <p>Browse {kind}</p>
-          </div>
-        ))}
-      </div>
-    </Layout>,
-  );
-});
+// Helper for rendering error pages
+const errorPageContent = (user: UserRow, title: string, message: string) => (
+  <Layout user={user} currentPath="/app">
+    <h2>{title}</h2>
+    <p class="error">{message}</p>
+  </Layout>
+);
 
-// GET /app/browser/:kind - List view for a kind
-appRoutes.get("/browser/:kind", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
-  const kind = c.req.param("kind");
-  if (!kind) {
-    return c.notFound();
+async function formBody(c: AppContext): Promise<Record<string, string>> {
+  const parsed = await c.req.parseBody();
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof value === "string") out[key] = value;
   }
-  const validKinds = [
-    "projects",
-    "thoughts",
-    "facts",
-    "tasks",
-    "people",
-    "documents",
-    "time-series-points",
-  ];
-  if (!validKinds.includes(kind)) {
-    return c.html(
-      <Layout user={user} currentPath="/app/browser">
-        <h2>Not Found</h2>
-        <p>Unknown kind: {escapeHtml(kind)}</p>
-      </Layout>,
-      404,
-    );
-  }
+  return out;
+}
 
-  return c.html(
-    <Layout user={user} currentPath={`/app/browser/${kind}`}>
-      <h2>{kind}</h2>
-      <p>List of {kind} (pagination and filtering would go here)</p>
-      <a href={`/app/browser`}>Back to Browser</a>
-    </Layout>,
+function asBool(value: string | undefined) {
+  return value === "on" || value === "true" || value === "1";
+}
+
+function dateInputToUnix(value?: string): string | undefined {
+  if (!value) return undefined;
+  const t = Date.parse(value);
+  return Number.isNaN(t) ? undefined : String(Math.floor(t / 1000));
+}
+
+function metricBar(count: number, max: number) {
+  const width = max > 0 ? Math.max(4, Math.round((count / max) * 100)) : 0;
+  return (
+    <span
+      style={{ display: "inline-block", width: `${width}%`, background: "#333", height: "0.6rem" }}
+    />
   );
-});
+}
 
-// GET /app/metrics - Metrics dashboard
-appRoutes.get("/metrics", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
-  return c.html(
-    <Layout user={user} currentPath="/app/metrics">
-      <h2>Metrics Dashboard</h2>
-      <p>Dashboard content would display here</p>
-    </Layout>,
+function isMarkdown(mimeType?: string | null) {
+  const type = (mimeType ?? "").toLowerCase();
+  return type.includes("markdown") || type === "text/md" || type === "text/x-markdown";
+}
+
+async function usersWithTokens(ctx: ReturnType<typeof memCtx>) {
+  const rows = await listUsers(ctx);
+  return Promise.all(
+    rows.map(async (row) => ({
+      ...row,
+      tokens: await listUserTokens(ctx, row.id),
+    })),
   );
-});
+}
 
-// GET /app/users - User management (admin only)
-appRoutes.get("/users", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
+async function usersPage(c: AppContext, issuedToken?: string) {
+  const user = c.get("user");
   if (!user.isAdmin) {
     return c.html(
       <Layout user={user} currentPath="/app/users">
@@ -277,35 +171,654 @@ appRoutes.get("/users", async (c: AppContext) => {
       403,
     );
   }
+  const users = await usersWithTokens(memCtx(c));
   return c.html(
     <Layout user={user} currentPath="/app/users">
       <h2>User Management</h2>
-      <p>User management interface would go here</p>
+      {issuedToken ? (
+        <div class="card success">
+          <h3>Token issued</h3>
+          <p>This plaintext token is shown once. It is not stored and will not appear again.</p>
+          <pre>{issuedToken}</pre>
+        </div>
+      ) : null}
+      <div class="card">
+        <h3>Create user</h3>
+        <form method="post" action="/app/users">
+          <label htmlFor="name">Name</label>
+          <input id="name" name="name" required />
+          <label htmlFor="slug">Slug</label>
+          <input id="slug" name="slug" pattern="[a-z0-9-]+" />
+          <label>
+            <input type="checkbox" name="is_admin" value="on" style={{ width: "auto" }} /> Admin
+          </label>
+          <button type="submit">Create user</button>
+        </form>
+      </div>
+      <div class="card">
+        <h3>Known users</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Edit</th>
+              <th>Slug</th>
+              <th>Role</th>
+              <th>Tokens</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((row) => (
+              <tr key={row.id}>
+                <td>
+                  <form method="post" action={`/app/users/${row.id}`}>
+                    <input name="name" value={row.name} aria-label={`Name for ${row.name}`} />
+                    <input name="slug" value={row.slug ?? ""} aria-label={`Slug for ${row.name}`} />
+                    <label>
+                      <input
+                        type="checkbox"
+                        name="is_admin"
+                        value="on"
+                        checked={row.isAdmin}
+                        style={{ width: "auto" }}
+                      />{" "}
+                      admin
+                    </label>
+                    <button type="submit">Save</button>
+                  </form>
+                </td>
+                <td>{row.slug ?? "—"}</td>
+                <td>{row.isAdmin ? "admin" : "user"}</td>
+                <td>
+                  {row.tokens.length ? (
+                    <ul>
+                      {row.tokens.map((token) => (
+                        <li key={token.id}>
+                          <code>{token.id}</code> created {fmtDate(token.createdAt)}, last used{" "}
+                          {fmtDate(token.lastUsedAt)}
+                          <form
+                            method="post"
+                            action={`/app/tokens/${token.id}/delete`}
+                            class="inline"
+                          >
+                            <button type="submit" class="danger">
+                              Revoke
+                            </button>
+                          </form>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    "none"
+                  )}
+                </td>
+                <td>
+                  <form method="post" action={`/app/users/${row.id}/tokens`} class="inline">
+                    <button type="submit">Issue token</button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </Layout>,
   );
+}
+
+function adminOnly(c: AppContext) {
+  if (c.get("user").isAdmin) return null;
+  return c.html(
+    <Layout user={c.get("user")} currentPath="/app/users">
+      <h2>Forbidden</h2>
+      <p>You do not have permission to manage users.</p>
+    </Layout>,
+    403,
+  );
+}
+
+function param(c: AppContext, name: string) {
+  const value = c.req.param(name);
+  if (!value) throw new MemoryError(400, `missing ${name}`);
+  return value;
+}
+
+type RecallResult = { kind: string; score: number; row: Record<string, unknown> };
+
+// GET /app - Home page with summary dashboard
+appRoutes.get("/", async (c: AppContext) => {
+  const user = c.get("user");
+  try {
+    const [summary, tokens] = await Promise.all([
+      getSummary(memCtx(c)),
+      listUserTokens(memCtx(c), user.id),
+    ]);
+
+    return c.html(
+      <Layout user={user} currentPath="/app">
+        <h2>Welcome, {user.name}</h2>
+
+        {/* Your account card */}
+        <div class="card">
+          <h3>Your account</h3>
+          <div style={{ display: "grid", gridTemplateColumns: "150px 1fr", gap: "0.5rem" }}>
+            <strong>Name:</strong>
+            <span>{user.name}</span>
+            <strong>Handle:</strong>
+            <span>{user.slug ?? "—"}</span>
+            <strong>Role:</strong>
+            <span>{user.isAdmin ? "Admin" : "User"}</span>
+          </div>
+        </div>
+
+        {/* Your tokens section */}
+        <div class="card">
+          <h3>Your tokens</h3>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr style={{ background: "#f5f5f5" }}>
+                  <th
+                    style={{
+                      padding: "0.75rem",
+                      textAlign: "left",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Token ID
+                  </th>
+                  <th
+                    style={{
+                      padding: "0.75rem",
+                      textAlign: "left",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Created
+                  </th>
+                  <th
+                    style={{
+                      padding: "0.75rem",
+                      textAlign: "left",
+                      borderBottom: "1px solid #ddd",
+                    }}
+                  >
+                    Last Used
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {tokens && tokens.length > 0 ? (
+                  tokens.map((token) => (
+                    <tr key={token.id} style={{ borderBottom: "1px solid #ddd" }}>
+                      <td style={{ padding: "0.75rem" }}>
+                        <code style={{ fontSize: "0.85rem" }}>{token.id.slice(0, 8)}...</code>
+                      </td>
+                      <td style={{ padding: "0.75rem" }}>{fmtDate(token.createdAt)}</td>
+                      <td style={{ padding: "0.75rem" }}>
+                        {token.lastUsedAt ? fmtDate(token.lastUsedAt) : "never"}
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={3} style={{ padding: "1rem", textAlign: "center", color: "#999" }}>
+                      No tokens yet
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* Summary dashboard - entity counts */}
+        <h3 style={{ marginTop: "2rem", marginBottom: "1rem" }}>Summary</h3>
+        <div class="grid">
+          {[
+            { kind: "projects", label: "Projects" },
+            { kind: "people", label: "People" },
+            { kind: "tasks", label: "Tasks" },
+            { kind: "facts", label: "Facts" },
+            { kind: "documents", label: "Documents" },
+            { kind: "thoughts", label: "Thoughts" },
+            { kind: "time_series_points", label: "Time Series Points" },
+          ].map((item) => {
+            const count = (summary.counts as Record<string, number | undefined>)[item.kind] ?? 0;
+            const kindPath = item.kind === "time_series_points" ? "time-series-points" : item.kind;
+            return (
+              <div class="card" key={item.kind}>
+                <h4 style={{ marginBottom: "0.5rem" }}>
+                  <a href={`/app/browser/${kindPath}`}>{item.label}</a>
+                </h4>
+                <div style={{ fontSize: "1.5rem", fontWeight: "bold" }}>{count}</div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Task and fact status breakdown */}
+        <div class="grid" style={{ marginTop: "1rem" }}>
+          <div class="card">
+            <h4>Task status</h4>
+            {Object.entries(summary.task_status as Record<string, number>).map(
+              ([status, count]) => (
+                <div key={status} style={{ marginBottom: "0.25rem" }}>
+                  <span class="tag">{status}</span>
+                  <span>{count}</span>
+                </div>
+              ),
+            )}
+          </div>
+          <div class="card">
+            <h4>Fact status</h4>
+            {Object.entries(summary.fact_status as Record<string, number>).map(
+              ([status, count]) => (
+                <div key={status} style={{ marginBottom: "0.25rem" }}>
+                  <span class="tag">{status}</span>
+                  <span>{count}</span>
+                </div>
+              ),
+            )}
+          </div>
+          <div class="card">
+            <h4>Recall index</h4>
+            <div style={{ marginBottom: "0.5rem" }}>
+              <strong>Chunks:</strong> {summary.chunks}
+            </div>
+            <div>
+              <strong>Recallable:</strong> {summary.recallable}
+            </div>
+          </div>
+        </div>
+
+        {/* Recent activity */}
+        <h3 style={{ marginTop: "2rem", marginBottom: "1rem" }}>Recent activity</h3>
+        {summary.recent && summary.recent.length > 0 ? (
+          <ul style={{ listStyleType: "none", padding: 0 }}>
+            {summary.recent.slice(0, 10).map((item) => (
+              <li key={item.id} style={{ marginBottom: "0.5rem", padding: "0.5rem 0" }}>
+                {item.href ? <a href={item.href}>{item.label}</a> : <span>{item.label}</span>}{" "}
+                <span style={{ color: "#999", fontSize: "0.9rem" }}>
+                  {fmtDate(item.created_at)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p style={{ color: "#999" }}>No recent activity</p>
+        )}
+
+        {/* Quick navigation */}
+        <div class="button-group" style={{ marginTop: "2rem" }}>
+          <a
+            href="/app/browser"
+            style={{
+              padding: "0.75rem 1.5rem",
+              background: "#333",
+              color: "white",
+              borderRadius: "4px",
+              textDecoration: "none",
+            }}
+          >
+            Browse data
+          </a>
+          <a
+            href="/app/search"
+            style={{
+              padding: "0.75rem 1.5rem",
+              background: "#333",
+              color: "white",
+              borderRadius: "4px",
+              textDecoration: "none",
+            }}
+          >
+            Search
+          </a>
+          <a
+            href="/app/metrics"
+            style={{
+              padding: "0.75rem 1.5rem",
+              background: "#333",
+              color: "white",
+              borderRadius: "4px",
+              textDecoration: "none",
+            }}
+          >
+            Metrics
+          </a>
+          {user.isAdmin ? (
+            <a
+              href="/app/users"
+              style={{
+                padding: "0.75rem 1.5rem",
+                background: "#333",
+                color: "white",
+                borderRadius: "4px",
+                textDecoration: "none",
+              }}
+            >
+              Users
+            </a>
+          ) : null}
+        </div>
+      </Layout>,
+    );
+  } catch (err) {
+    if (err instanceof MemoryError) {
+      return c.html(errorPageContent(user, "Error", err.message), errorStatus(err.status));
+    }
+    throw err;
+  }
+});
+
+// Mount browserRoutes at /browser
+appRoutes.route("/browser", browserRoutes);
+
+// GET /app/search - Recall search
+appRoutes.get("/search", async (c: AppContext) => {
+  const user = c.get("user");
+  const query = c.req.query("q")?.trim() ?? "";
+  const projectId = c.req.query("project_id") || undefined;
+  const ctx = memCtx(c);
+  const [projects, results] = await Promise.all([
+    listProjects(ctx),
+    query
+      ? (recall(ctx, { query, project_id: projectId, limit: 20 }) as Promise<RecallResult[]>)
+      : Promise.resolve([] as RecallResult[]),
+  ]);
+  return c.html(
+    <Layout user={user} currentPath="/app/search">
+      <h2>Recall search</h2>
+      <form method="get" action="/app/search" class="filters">
+        <div>
+          <label htmlFor="q">Query</label>
+          <input type="search" id="q" name="q" value={query} required />
+        </div>
+        <div>
+          <label htmlFor="project_id">Project</label>
+          <select id="project_id" name="project_id">
+            <option value="">All projects</option>
+            {projects.map((project) => (
+              <option value={project.id} selected={project.id === projectId} key={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <button type="submit">Search</button>
+      </form>
+      {query ? (
+        <div class="card">
+          <h3>Results</h3>
+          {results.length ? (
+            <ul>
+              {results.map((result) => {
+                const row = result.row as Record<string, unknown>;
+                const label =
+                  result.kind === "fact"
+                    ? String(row.statement)
+                    : result.kind === "thought"
+                      ? String(row.content)
+                      : String(row.content ?? row.id);
+                const href =
+                  result.kind === "fact"
+                    ? `/app/browser/facts/${row.id}`
+                    : result.kind === "thought"
+                      ? `/app/browser/thoughts/${row.id}`
+                      : `/app/documents/${(row.document as { id?: string } | undefined)?.id}`;
+                return (
+                  <li key={`${result.kind}:${row.id}`}>
+                    <span class="tag">{result.kind}</span> <a href={href}>{label}</a>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p>No recall results.</p>
+          )}
+        </div>
+      ) : null}
+    </Layout>,
+  );
+});
+
+// GET /app/metrics - Metrics dashboard
+appRoutes.get("/metrics", async (c: AppContext) => {
+  const user = c.get("user");
+  const projectId = c.req.query("project_id") || undefined;
+  const fromInput = c.req.query("from") || undefined;
+  const toInput = c.req.query("to") || undefined;
+  const ctx = memCtx(c);
+  const [projects, metrics] = await Promise.all([
+    listProjects(ctx),
+    getMetrics(ctx, {
+      project_id: projectId,
+      from: dateInputToUnix(fromInput),
+      to: dateInputToUnix(toInput),
+    }),
+  ]);
+  const taskMax = Math.max(1, ...Object.values(metrics.task_status as Record<string, number>));
+  const factMax = Math.max(1, ...Object.values(metrics.fact_status as Record<string, number>));
+  return c.html(
+    <Layout user={user} currentPath="/app/metrics">
+      <h2>Metrics Dashboard</h2>
+      <form method="get" action="/app/metrics" class="filters">
+        <div>
+          <label htmlFor="project_id">Project</label>
+          <select id="project_id" name="project_id">
+            <option value="">All projects</option>
+            {projects.map((project) => (
+              <option value={project.id} selected={project.id === projectId} key={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label htmlFor="from">From</label>
+          <input type="date" id="from" name="from" value={fromInput ?? ""} />
+        </div>
+        <div>
+          <label htmlFor="to">To</label>
+          <input type="date" id="to" name="to" value={toInput ?? ""} />
+        </div>
+        <button type="submit">Filter</button>
+      </form>
+      <div class="grid">
+        {Object.entries(metrics.counts as Record<string, number>).map(([kind, count]) => (
+          <div class="card" key={kind}>
+            <h3>{kind.replace(/_/g, " ")}</h3>
+            <p style={{ fontSize: "1.75rem", fontWeight: "bold" }}>{count}</p>
+          </div>
+        ))}
+        <div class="card">
+          <h3>Document chunks</h3>
+          <p style={{ fontSize: "1.75rem", fontWeight: "bold" }}>{metrics.chunks}</p>
+        </div>
+        <div class="card">
+          <h3>Recallable rows</h3>
+          <p style={{ fontSize: "1.75rem", fontWeight: "bold" }}>{metrics.recallable}</p>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <h3>Task status counts</h3>
+          {Object.entries(metrics.task_status as Record<string, number>).map(([status, count]) => (
+            <p key={status}>
+              <span class="tag">{status}</span> {count} {metricBar(count, taskMax)}
+            </p>
+          ))}
+        </div>
+        <div class="card">
+          <h3>Fact status counts</h3>
+          {Object.entries(metrics.fact_status as Record<string, number>).map(([status, count]) => (
+            <p key={status}>
+              <span class="tag">{status}</span> {count} {metricBar(count, factMax)}
+            </p>
+          ))}
+        </div>
+      </div>
+      <div class="card">
+        <h3>Time-series rollups</h3>
+        {metrics.time_series.length ? (
+          <table>
+            <thead>
+              <tr>
+                <th>Series</th>
+                <th>Count</th>
+                <th>Latest</th>
+                <th>Min</th>
+                <th>Max</th>
+                <th>Avg</th>
+              </tr>
+            </thead>
+            <tbody>
+              {metrics.time_series.map((series) => (
+                <tr key={series.series_key}>
+                  <td>{series.series_key}</td>
+                  <td>{series.count}</td>
+                  <td>{series.latest_value ?? "—"}</td>
+                  <td>{series.min ?? "—"}</td>
+                  <td>{series.max ?? "—"}</td>
+                  <td>{series.avg === null ? "—" : series.avg.toFixed(2)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p>No time-series points in this range.</p>
+        )}
+      </div>
+      <div class="card">
+        <h3>Recent activity</h3>
+        {metrics.recent.length ? (
+          <ul>
+            {metrics.recent.map((item) => (
+              <li key={`${item.kind}:${item.id}`}>
+                {item.href ? <a href={item.href}>{item.label}</a> : <span>{item.label}</span>}{" "}
+                <span class="tag">{item.kind}</span> {fmtDate(item.created_at)}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>No recent activity.</p>
+        )}
+      </div>
+    </Layout>,
+  );
+});
+
+// GET /app/users - User management (admin only)
+appRoutes.get("/users", async (c: AppContext) => {
+  return usersPage(c);
+});
+
+appRoutes.post("/users", async (c: AppContext) => {
+  const denied = adminOnly(c);
+  if (denied) return denied;
+  const form = await formBody(c);
+  await createUser(memCtx(c), {
+    name: form.name ?? "",
+    slug: form.slug || null,
+    is_admin: asBool(form.is_admin),
+  });
+  return c.redirect("/app/users");
+});
+
+appRoutes.post("/users/:id", async (c: AppContext) => {
+  const denied = adminOnly(c);
+  if (denied) return denied;
+  const form = await formBody(c);
+  await updateUser(memCtx(c), param(c, "id"), {
+    name: form.name,
+    slug: form.slug || null,
+    is_admin: asBool(form.is_admin),
+  });
+  return c.redirect("/app/users");
+});
+
+appRoutes.post("/users/:id/tokens", async (c: AppContext) => {
+  const denied = adminOnly(c);
+  if (denied) return denied;
+  const token = await createUserToken(memCtx(c), param(c, "id"));
+  return usersPage(c, token.token);
+});
+
+appRoutes.post("/tokens/:id/delete", async (c: AppContext) => {
+  const denied = adminOnly(c);
+  if (denied) return denied;
+  await revokeToken(memCtx(c), param(c, "id"));
+  return c.redirect("/app/users");
 });
 
 // GET /app/documents/:id - Document reader
 appRoutes.get("/documents/:id", async (c: AppContext) => {
-  const user = c.get("user") as UserRow;
-  const docId = c.req.param("id");
-  if (!docId) {
-    return c.notFound();
+  const user = c.get("user");
+  try {
+    const docId = param(c, "id");
+    const ctx = memCtx(c);
+    const [document, content, relations, projects] = await Promise.all([
+      getEntity(ctx, "documents", docId),
+      getDocumentContent(ctx, docId),
+      getEntityRelations(ctx, "documents", docId),
+      listProjects(ctx),
+    ]);
+    const projectId = (document.projectId as string | null) ?? null;
+    const project = projectId ? projects.find((p) => p.id === projectId) : null;
+    c.header("Cache-Control", "no-store");
+    return c.html(
+      <Layout user={user} currentPath="/app/documents">
+        <p>
+          <a href="/app/browser/documents">← Back to Documents</a>
+        </p>
+        <h2>{document.title as string}</h2>
+        <Provenance
+          source={document.source as string | null}
+          projectId={projectId}
+          projectLabel={project?.name ?? null}
+          createdAt={document.createdAt as Date | undefined}
+          updatedAt={document.updatedAt as Date | undefined}
+        />
+        <div class="metadata">
+          <div>MIME type: {document.mimeType as string}</div>
+          <div>Size: {document.sizeBytes as number} bytes</div>
+          <div>Chunks: {document.chunkCount as number}</div>
+          <div>
+            <a href={`/app/documents/${docId}/raw`}>Raw content</a>
+          </div>
+        </div>
+        <h3>Dependencies</h3>
+        <RelationsList relations={relations} />
+        <h3>Content</h3>
+        {isMarkdown(document.mimeType as string | null) ? (
+          <article class="content">{raw(markdownToHtml(content.content))}</article>
+        ) : (
+          <pre>{escapeHtml(content.content)}</pre>
+        )}
+      </Layout>,
+    );
+  } catch (error) {
+    if (error instanceof MemoryError) {
+      return c.html(errorPageContent(user, "Error", error.message), errorStatus(error.status));
+    }
+    throw error;
   }
-  return c.html(
-    <Layout user={user} currentPath="/app/documents">
-      <h2>Document</h2>
-      <p>Document ID: {escapeHtml(docId)}</p>
-      <p>Document reader would display here</p>
-    </Layout>,
-  );
 });
 
 // GET /app/documents/:id/raw - Raw document content
 appRoutes.get("/documents/:id/raw", async (c: AppContext) => {
-  return c.text("Raw content would be served here", 200, {
-    "Cache-Control": "no-store",
-  });
+  try {
+    const content = await getDocumentContent(memCtx(c), param(c, "id"));
+    return c.text(content.content, 200, {
+      "Cache-Control": "no-store",
+      "Content-Type": "text/plain; charset=utf-8",
+    });
+  } catch (error) {
+    if (error instanceof MemoryError) return c.text(error.message, errorStatus(error.status));
+    throw error;
+  }
 });
 
+// Mount appRoutes at /app
 uiRoutes.route("/app", appRoutes);
