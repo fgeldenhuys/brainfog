@@ -147,6 +147,11 @@ export async function handleAuthorizeGet(
       <strong>Authorization Code:</strong>
       <div id="code-value" style="margin-top: 8px; word-break: break-all;"></div>
       <button type="button" onclick="copyCode()" style="margin-top: 12px; background: #28a745;">Copy Code</button>
+      <a
+        id="callback-link"
+        href="#"
+        style="display: block; box-sizing: border-box; width: 100%; padding: 12px; margin-top: 12px; background: #007bff; color: white; text-align: center; border-radius: 4px; text-decoration: none; font-weight: 600;"
+      >Continue</a>
     </div>
     <p style="color: #999; font-size: 12px; margin-top: 30px;">
       Your token is sent over HTTPS and never stored on this server.
@@ -177,6 +182,7 @@ export async function handleAuthorizeGet(
         const data = await response.json();
         if (response.ok) {
           document.getElementById('code-value').textContent = data.authorization_code;
+          document.getElementById('callback-link').href = data.redirect_uri;
           codeBlock.classList.add('active');
           errorBlock.classList.remove('active');
           document.getElementById('token').value = '';
