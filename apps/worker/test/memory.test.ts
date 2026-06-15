@@ -24,6 +24,7 @@ import {
   recall,
   recordFact,
   remember,
+  setShared,
   updateDocument,
   updateFact,
   updateTask,
@@ -2373,5 +2374,694 @@ describe("Shared visibility", async () => {
       await db.select({ shared: tasks.shared }).from(tasks).where(eq(tasks.id, task.id)).limit(1)
     )[0];
     expect(taskRow?.shared).toBe(true);
+  });
+
+  // ==================== PBI-010: Shared Visibility Read Paths ====================
+
+  describe("Recall returns shared content cross-owner (two-query merge)", () => {
+    it("recall includes another user's shared thought via merged two-query results", async () => {
+      // User A creates and shares a thought
+      const aThoughtRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "shared project kickoff notes and planning" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aThought = await json<{ id: string }>(aThoughtRes);
+
+      // Mark it shared
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "thought", entity_id: aThought.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User B creates a private thought (should not be in results)
+      const bPrivateRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "private user B thought unrelated" }),
+        },
+        TOKEN_SHARED_B,
+      );
+      await json<{ id: string }>(bPrivateRes);
+
+      // Mock Vectorize to return both owner-scoped (A's private) and shared-scoped (A's shared) results
+      const query = vi.fn(
+        async (_values, options?: { topK?: number; filter?: Record<string, unknown> }) => {
+          const filter = options?.filter as Record<string, unknown> | undefined;
+          const isOwnerScoped = filter?.owner_id === "user-shared-b";
+          const isSharedScoped = filter?.shared === true;
+
+          if (isOwnerScoped) {
+            // B's own results (should not include A's shared thought)
+            return { matches: [] };
+          } else if (isSharedScoped) {
+            // Shared results (includes A's shared thought)
+            return {
+              matches: [{ id: aThought.id, score: 0.95, metadata: { kind: "thought" } }],
+            };
+          }
+          return { matches: [] };
+        },
+      );
+
+      const vectorEnv = {
+        DB: env.DB,
+        DOCUMENTS: env.DOCUMENTS,
+        VECTORIZE: { upsert: vi.fn(), deleteByIds: vi.fn(), query },
+        AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
+      } as unknown as typeof env;
+
+      const results = await recall(
+        { env: vectorEnv, user: { id: "user-shared-b", name: "Shared B" }, source: "test" },
+        { query: "shared project kickoff", limit: 10 },
+      );
+
+      expect(results.length).toBeGreaterThan(0);
+      const resultIds = results.map((r) => (r as { row: { id: string } }).row.id);
+      expect(resultIds).toContain(aThought.id);
+    });
+
+    it("recall de-duplicates and re-ranks when same entity appears in both queries", async () => {
+      // User A creates and shares a fact
+      const aFactRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "shared fact about metrics" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aFact = await json<{ id: string }>(aFactRes);
+
+      // Mark it shared
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // Mock Vectorize to return same fact in both queries (but with different scores)
+      const query = vi.fn(
+        async (_values, options?: { topK?: number; filter?: Record<string, unknown> }) => {
+          const filter = options?.filter as Record<string, unknown> | undefined;
+          const isOwnerScoped = filter?.owner_id === "user-shared-b";
+          const isSharedScoped = filter?.shared === true;
+
+          if (isOwnerScoped) {
+            // B's own results: lower score
+            return {
+              matches: [{ id: aFact.id, score: 0.5, metadata: { kind: "fact" } }],
+            };
+          } else if (isSharedScoped) {
+            // Shared results: higher score
+            return {
+              matches: [{ id: aFact.id, score: 0.9, metadata: { kind: "fact" } }],
+            };
+          }
+          return { matches: [] };
+        },
+      );
+
+      const vectorEnv = {
+        DB: env.DB,
+        DOCUMENTS: env.DOCUMENTS,
+        VECTORIZE: { upsert: vi.fn(), deleteByIds: vi.fn(), query },
+        AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
+      } as unknown as typeof env;
+
+      const results = await recall(
+        { env: vectorEnv, user: { id: "user-shared-b", name: "Shared B" }, source: "test" },
+        { query: "metrics", limit: 10 },
+      );
+
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(results.length).toBe(1);
+      expect((results[0] as { row: { id: string } }).row.id).toBe(aFact.id);
+    });
+  });
+
+  describe("REST list routes return shared=true rows", () => {
+    it("listProjects includes another user's shared project", async () => {
+      // User A creates and shares a project
+      const aProjectRes = await authFetch(
+        "/api/v1/projects",
+        {
+          method: "POST",
+          body: JSON.stringify({ name: "User A Shared Project" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aProject = await json<{ id: string }>(aProjectRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "project", entity_id: aProject.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User A also creates a private project
+      const aPrivateRes = await authFetch(
+        "/api/v1/projects",
+        {
+          method: "POST",
+          body: JSON.stringify({ name: "User A Private Project" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aPrivate = await json<{ id: string }>(aPrivateRes);
+
+      // User B lists projects
+      const bProjectsRes = await authFetch("/api/v1/projects", {}, TOKEN_SHARED_B);
+      const bProjects = await json<{ id: string; name: string }[]>(bProjectsRes);
+      const bProjectIds = bProjects.map((p) => p.id);
+
+      // B should see A's shared project but not A's private project
+      expect(bProjectIds).toContain(aProject.id);
+      expect(bProjectIds).not.toContain(aPrivate.id);
+    });
+
+    it("listTasks includes another user's shared task", async () => {
+      // User A creates and shares a task
+      const aTaskRes = await authFetch(
+        "/api/v1/tasks",
+        {
+          method: "POST",
+          body: JSON.stringify({ title: "User A Shared Task" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aTask = await json<{ id: string }>(aTaskRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "task", entity_id: aTask.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User A creates a private task
+      const aPrivateRes = await authFetch(
+        "/api/v1/tasks",
+        {
+          method: "POST",
+          body: JSON.stringify({ title: "User A Private Task" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aPrivate = await json<{ id: string }>(aPrivateRes);
+
+      // User B lists tasks
+      const bTasksRes = await authFetch("/api/v1/tasks", {}, TOKEN_SHARED_B);
+      const bTasks = await json<{ id: string; title: string }[]>(bTasksRes);
+      const bTaskIds = bTasks.map((t) => t.id);
+
+      expect(bTaskIds).toContain(aTask.id);
+      expect(bTaskIds).not.toContain(aPrivate.id);
+    });
+
+    it("listFacts includes another user's shared fact", async () => {
+      // User A creates and shares a fact
+      const aFactRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "User A Shared Fact" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aFact = await json<{ id: string }>(aFactRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User A creates a private fact
+      const aPrivateRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "User A Private Fact" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aPrivate = await json<{ id: string }>(aPrivateRes);
+
+      // User B lists facts
+      const bFactsRes = await authFetch("/api/v1/facts", {}, TOKEN_SHARED_B);
+      const bFacts = await json<{ id: string; statement: string }[]>(bFactsRes);
+      const bFactIds = bFacts.map((f) => f.id);
+
+      expect(bFactIds).toContain(aFact.id);
+      expect(bFactIds).not.toContain(aPrivate.id);
+    });
+
+    it("listThoughts includes another user's shared thought", async () => {
+      // User A creates and shares a thought
+      const aThoughtRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "User A Shared Thought" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aThought = await json<{ id: string }>(aThoughtRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "thought", entity_id: aThought.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User A creates a private thought
+      const aPrivateRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "User A Private Thought" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aPrivate = await json<{ id: string }>(aPrivateRes);
+
+      // User B lists thoughts
+      const bThoughtsRes = await authFetch("/api/v1/thoughts", {}, TOKEN_SHARED_B);
+      const bThoughts = await json<{ id: string; content: string }[]>(bThoughtsRes);
+      const bThoughtIds = bThoughts.map((t) => t.id);
+
+      expect(bThoughtIds).toContain(aThought.id);
+      expect(bThoughtIds).not.toContain(aPrivate.id);
+    });
+
+    it("listDocuments includes another user's shared document", async () => {
+      // User A creates and shares a document
+      const aDocRes = await authFetch(
+        "/api/v1/documents",
+        {
+          method: "POST",
+          body: JSON.stringify({ title: "User A Shared Document", content: "shared doc content" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aDoc = await json<{ id: string }>(aDocRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "document", entity_id: aDoc.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User A creates a private document
+      const aPrivateRes = await authFetch(
+        "/api/v1/documents",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            title: "User A Private Document",
+            content: "private doc content",
+          }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aPrivate = await json<{ id: string }>(aPrivateRes);
+
+      // User B lists documents
+      const bDocsRes = await authFetch("/api/v1/documents", {}, TOKEN_SHARED_B);
+      const bDocs = await json<{ id: string; title: string }[]>(bDocsRes);
+      const bDocIds = bDocs.map((d) => d.id);
+
+      expect(bDocIds).toContain(aDoc.id);
+      expect(bDocIds).not.toContain(aPrivate.id);
+    });
+  });
+
+  describe("Dependency graph supports shared entity access", () => {
+    it("Edges referencing shared entities are listed without errors", async () => {
+      // User A creates and shares a fact
+      const aFactRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "Shared fact for dependency listing" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aFact = await json<{ id: string }>(aFactRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User B creates a thought and links it to A's shared fact (contagion marks B's thought shared)
+      const bThoughtRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "User B Thought referencing shared fact" }),
+        },
+        TOKEN_SHARED_B,
+      );
+      const bThought = await json<{ id: string }>(bThoughtRes);
+
+      const depRes = await authFetch(
+        "/api/v1/dependencies",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dependent: { kind: "thought", id: bThought.id },
+            dependency: { kind: "fact", id: aFact.id },
+            relationship: "derived_from",
+          }),
+        },
+        TOKEN_SHARED_B,
+      );
+      expect(depRes.status).toBeLessThan(300);
+
+      // User B should be able to list dependencies (basic smoke test)
+      const depsRes = await authFetch(
+        `/api/v1/dependencies?entity_kind=thought&entity_id=${bThought.id}`,
+        {},
+        TOKEN_SHARED_B,
+      );
+      expect(depsRes.status).toBeLessThan(300);
+    });
+  });
+
+  describe("Cross-owner stale propagation via shared entities", () => {
+    it("Updating a shared fact marks dependent edges stale across owners", async () => {
+      // User A creates and shares a fact
+      const aFactRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "User A Shared Fact for staleness" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aFact = await json<{ id: string }>(aFactRes);
+
+      await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+
+      // User B creates a thought with a derived_from edge to A's shared fact
+      const bThoughtRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "User B Thought depending on A's fact" }),
+        },
+        TOKEN_SHARED_B,
+      );
+      const bThought = await json<{ id: string }>(bThoughtRes);
+
+      const depRes = await authFetch(
+        "/api/v1/dependencies",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dependent: { kind: "thought", id: bThought.id },
+            dependency: { kind: "fact", id: aFact.id },
+            relationship: "derived_from",
+          }),
+        },
+        TOKEN_SHARED_B,
+      );
+      expect(depRes.status).toBeLessThan(300);
+
+      // User A updates the fact
+      const updateRes = await authFetch(
+        `/api/v1/facts/${aFact.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ statement: "User A Updated Shared Fact" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      expect(updateRes.status).toBeLessThan(300);
+
+      // User B lists stale edges (should see their own edge marked stale)
+      const staleRes = await authFetch("/api/v1/dependencies/stale", {}, TOKEN_SHARED_B);
+      expect(staleRes.status).toBeLessThan(300);
+      const staleEdges =
+        await json<
+          {
+            dependentKind: string;
+            dependentId: string;
+            dependencyKind: string;
+            dependencyId: string;
+          }[]
+        >(staleRes);
+
+      // The edge from B's thought to A's fact should be marked stale
+      const foundStale = staleEdges.some(
+        (e) =>
+          e.dependentKind === "thought" &&
+          e.dependentId === bThought.id &&
+          e.dependencyKind === "fact" &&
+          e.dependencyId === aFact.id,
+      );
+      expect(foundStale).toBe(true);
+    });
+
+    it("markDownstreamStale marks edges of non-owner dependents when dependency is shared", async () => {
+      // User A creates and shares a fact
+      const aFactRes = await authFetch(
+        "/api/v1/facts",
+        {
+          method: "POST",
+          body: JSON.stringify({ statement: "Shared fact for cross-owner stale" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      const aFact = await json<{ id: string }>(aFactRes);
+
+      const shareRes = await authFetch(
+        "/api/v1/shared",
+        {
+          method: "POST",
+          body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+        },
+        TOKEN_SHARED_A,
+      );
+      expect(shareRes.status).toBeLessThan(300);
+
+      // User B creates a thought and links to A's shared fact (B's thought becomes shared)
+      const bThoughtRes = await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "User B Thought linking to shared fact" }),
+        },
+        TOKEN_SHARED_B,
+      );
+      const bThought = await json<{ id: string }>(bThoughtRes);
+
+      const depRes = await authFetch(
+        "/api/v1/dependencies",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            dependent: { kind: "thought", id: bThought.id },
+            dependency: { kind: "fact", id: aFact.id },
+            relationship: "derived_from",
+          }),
+        },
+        TOKEN_SHARED_B,
+      );
+      expect(depRes.status).toBeLessThan(300);
+
+      // Verify that when A updates their fact, B sees the edge as stale
+      const updateRes = await authFetch(
+        `/api/v1/facts/${aFact.id}`,
+        {
+          method: "PATCH",
+          body: JSON.stringify({ statement: "Updated shared fact version 2" }),
+        },
+        TOKEN_SHARED_A,
+      );
+      expect(updateRes.status).toBeLessThan(300);
+
+      // B should see the stale edge
+      const staleRes = await authFetch("/api/v1/dependencies/stale", {}, TOKEN_SHARED_B);
+      expect(staleRes.status).toBeLessThan(300);
+      const staleEdges =
+        await json<
+          {
+            dependentKind: string;
+            dependentId: string;
+            dependencyKind: string;
+            dependencyId: string;
+          }[]
+        >(staleRes);
+
+      const foundStale = staleEdges.some(
+        (e) =>
+          e.dependentKind === "thought" &&
+          e.dependentId === bThought.id &&
+          e.dependencyKind === "fact" &&
+          e.dependencyId === aFact.id,
+      );
+      expect(foundStale).toBe(true);
+    });
+  });
+
+  describe("Vectorize metadata shared sync", () => {
+    it("setShared on thought calls resyncVectorSharedMetadata", async () => {
+      const getByIdsMock = vi.fn(async (ids: string[]) => {
+        return ids.map((id) => ({
+          id,
+          values: Array.from({ length: 1024 }, () => 0.25),
+          metadata: { kind: "thought", owner_id: "user-shared-a" },
+        }));
+      });
+      const upsertMock = vi.fn(async () => undefined);
+
+      const serviceEnv = {
+        DB: env.DB,
+        DOCUMENTS: env.DOCUMENTS,
+        VECTORIZE: {
+          upsert: upsertMock,
+          deleteByIds: vi.fn(),
+          query: vi.fn(),
+          getByIds: getByIdsMock,
+        },
+        AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
+      } as unknown as typeof env;
+
+      const ctx = {
+        env: serviceEnv,
+        user: { id: "user-shared-a", name: "Shared A" },
+        source: "test:service",
+      };
+      const thought = await remember(ctx, { content: "vector shared test thought" });
+
+      // Call setShared directly
+      await setShared(ctx, {
+        entity_kind: "thought",
+        entity_id: thought.id,
+        shared: true,
+      });
+
+      // Verify getByIds was called
+      expect(getByIdsMock).toHaveBeenCalledWith([thought.id]);
+
+      // Verify upsert was called with shared metadata
+      expect(upsertMock).toHaveBeenCalled();
+      const upsertCalls = upsertMock.mock.calls as unknown as Array<
+        [Array<{ id: string; values: number[]; metadata: Record<string, unknown> }>]
+      >;
+
+      const hasSharedMetadata = upsertCalls.some((call) => {
+        const vector = call[0]?.[0];
+        return vector?.id === thought.id && vector?.metadata?.shared === true;
+      });
+      expect(hasSharedMetadata).toBe(true);
+    });
+
+    it("setShared on document syncs chunk vectors", async () => {
+      const getByIdsMock = vi.fn(async (ids: string[]) => {
+        return ids.map((id) => ({
+          id,
+          values: Array.from({ length: 1024 }, () => 0.25),
+          metadata: { kind: "document_chunk", owner_id: "user-shared-a" },
+        }));
+      });
+      const upsertMock = vi.fn(async () => undefined);
+
+      const serviceEnv = {
+        DB: env.DB,
+        DOCUMENTS: env.DOCUMENTS,
+        VECTORIZE: {
+          upsert: upsertMock,
+          deleteByIds: vi.fn(),
+          query: vi.fn(),
+          getByIds: getByIdsMock,
+        },
+        AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
+      } as unknown as typeof env;
+
+      const ctx = {
+        env: serviceEnv,
+        user: { id: "user-shared-a", name: "Shared A" },
+        source: "test:service",
+      };
+      const doc = await addDocument(ctx, {
+        title: "Doc for chunk vector sync",
+        content: "first chunk content here for sync test second chunk content for test",
+      });
+
+      const db = createDb(env.DB);
+      const chunks = await db
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .where(eq(documentChunks.documentId, doc.id));
+      expect(chunks.length).toBeGreaterThan(0);
+
+      // Set document shared
+      await setShared(ctx, {
+        entity_kind: "document",
+        entity_id: doc.id,
+        shared: true,
+      });
+
+      // Verify getByIds was called for chunks
+      const getByIdsCalls = getByIdsMock.mock.calls as unknown as Array<[string[]]>;
+      const allGetIds = getByIdsCalls.flatMap((call) => call[0]);
+      for (const chunk of chunks) {
+        expect(allGetIds).toContain(chunk.id);
+      }
+
+      // Verify upsert was called with shared=true for chunks
+      expect(upsertMock).toHaveBeenCalled();
+      const upsertCalls = upsertMock.mock.calls as unknown as Array<
+        [Array<{ id: string; values: number[]; metadata: Record<string, unknown> }>]
+      >;
+
+      for (const chunk of chunks) {
+        const hasChunkWithShared = upsertCalls.some((call) => {
+          const vector = call[0]?.[0];
+          return vector?.id === chunk.id && vector?.metadata?.shared === true;
+        });
+        expect(hasChunkWithShared).toBe(true);
+      }
+    });
   });
 });

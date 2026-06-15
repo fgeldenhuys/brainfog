@@ -345,16 +345,28 @@ async function cascadeShare(
         .update(facts)
         .set({ shared: true, updatedAt: now() })
         .where(eq(facts.id, current.id));
+      // Sync Vectorize metadata for the fact
+      await resyncVectorSharedMetadata(ctx, current.id);
     } else if (current.kind === "document") {
       await db
         .update(documents)
         .set({ shared: true, updatedAt: now() })
         .where(eq(documents.id, current.id));
+      // Sync Vectorize metadata for all document chunks
+      const chunks = await db
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .where(eq(documentChunks.documentId, current.id));
+      for (const chunk of chunks) {
+        await resyncVectorSharedMetadata(ctx, chunk.id);
+      }
     } else if (current.kind === "thought") {
       await db
         .update(thoughts)
         .set({ shared: true, updatedAt: now() })
         .where(eq(thoughts.id, current.id));
+      // Sync Vectorize metadata for the thought
+      await resyncVectorSharedMetadata(ctx, current.id);
     } else if (current.kind === "time_series_point") {
       await db
         .update(timeSeriesPoints)
@@ -374,6 +386,14 @@ async function cascadeShare(
           .update(documents)
           .set({ shared: true, updatedAt: now() })
           .where(eq(documents.id, docChunk.documentId));
+        // Sync Vectorize metadata for all document chunks
+        const chunks = await db
+          .select({ id: documentChunks.id })
+          .from(documentChunks)
+          .where(eq(documentChunks.documentId, docChunk.documentId));
+        for (const chunk of chunks) {
+          await resyncVectorSharedMetadata(ctx, chunk.id);
+        }
         cascaded.set(`document:${docChunk.documentId}`, {
           kind: "document",
           id: docChunk.documentId,
@@ -667,32 +687,23 @@ async function markDownstreamStale(
   dependencyId: string,
   reason = "upstream_updated",
 ) {
-  await createDb(ctx.env.DB)
-    .update(dependencyEdges)
-    .set({ staleAt: now(), staleReason: reason, updatedAt: now() })
-    .where(
-      and(
-        eq(dependencyEdges.ownerId, ctx.user.id),
-        eq(dependencyEdges.dependencyKind, dependencyKind),
-        eq(dependencyEdges.dependencyId, dependencyId),
-        inArray(dependencyEdges.relationship, staleRelationships),
-      ),
-    );
-}
-
-async function markGlobalPersonDownstreamStale(
-  ctx: Ctx,
-  personId: string,
-  reason = "upstream_updated",
-) {
+  const db = createDb(ctx.env.DB);
+  const isGlobal =
+    dependencyKind === "person" || (await getEntityShared(db, dependencyKind, dependencyId));
   const timestamp = now();
-  await createDb(ctx.env.DB)
+
+  // If the dependency is global (person) or shared, mark stale across all owners
+  // Otherwise, scope to caller's edges only
+  const ownerFilter = isGlobal ? [] : [eq(dependencyEdges.ownerId, ctx.user.id)];
+
+  await db
     .update(dependencyEdges)
     .set({ staleAt: timestamp, staleReason: reason, updatedAt: timestamp })
     .where(
       and(
-        eq(dependencyEdges.dependencyKind, "person"),
-        eq(dependencyEdges.dependencyId, personId),
+        ...ownerFilter,
+        eq(dependencyEdges.dependencyKind, dependencyKind),
+        eq(dependencyEdges.dependencyId, dependencyId),
         inArray(dependencyEdges.relationship, staleRelationships),
       ),
     );
@@ -927,14 +938,24 @@ export async function listDependencies(
   if (!["upstream", "downstream", "both"].includes(direction))
     throw new MemoryError(400, "invalid direction");
   if (input.relationship) asRelationship(input.relationship);
-  await ensureEntity(ctx, entityKind, input.entity_id, "dependent", "entity not found");
-  const filters = [eq(dependencyEdges.ownerId, ctx.user.id)];
+  // Relax existence check to "dependency" position to allow reading edges where the queried entity is shared
+  await ensureEntity(ctx, entityKind, input.entity_id, "dependency", "entity not found");
+
+  const db = createDb(ctx.env.DB);
+  const filters = [];
+  let queryDirection: "upstream" | "downstream" | "both" = direction as
+    | "upstream"
+    | "downstream"
+    | "both";
+
   if (direction === "upstream") {
     filters.push(eq(dependencyEdges.dependentKind, entityKind));
     filters.push(eq(dependencyEdges.dependentId, input.entity_id));
+    queryDirection = "upstream";
   } else if (direction === "downstream") {
     filters.push(eq(dependencyEdges.dependencyKind, entityKind));
     filters.push(eq(dependencyEdges.dependencyId, input.entity_id));
+    queryDirection = "downstream";
   } else {
     const eitherDirection = or(
       and(
@@ -948,13 +969,70 @@ export async function listDependencies(
     );
     if (!eitherDirection) throw new MemoryError(400, "invalid dependency query");
     filters.push(eitherDirection);
+    queryDirection = "both";
   }
   if (input.relationship) filters.push(eq(dependencyEdges.relationship, input.relationship));
-  return createDb(ctx.env.DB)
+
+  const allEdges = await db
     .select()
     .from(dependencyEdges)
     .where(and(...filters))
     .orderBy(desc(dependencyEdges.createdAt));
+
+  // Filter edges: return if caller owns it, or the non-queried endpoint is accessible
+  const visibleEdges = [];
+  for (const edge of allEdges) {
+    // Always return if caller owns the edge
+    if (edge.ownerId === ctx.user.id) {
+      visibleEdges.push(edge);
+      continue;
+    }
+
+    // For cross-owner edges, check if the non-queried endpoint is accessible to caller
+    let otherEndpointAccessible = false;
+    if (queryDirection === "upstream") {
+      // Entity is the dependent; check if the dependency is accessible
+      otherEndpointAccessible = await entityExists(
+        ctx,
+        edge.dependencyKind as GraphKind,
+        edge.dependencyId,
+        "dependency",
+      );
+    } else if (queryDirection === "downstream") {
+      // Entity is the dependency; check if the dependent is accessible
+      otherEndpointAccessible = await entityExists(
+        ctx,
+        edge.dependentKind as GraphKind,
+        edge.dependentId,
+        "dependency",
+      );
+    } else {
+      // Both directions; check both endpoints (but one is the queried entity, so check the other)
+      if (edge.dependentKind === entityKind && edge.dependentId === input.entity_id) {
+        // Entity is the dependent; check dependency
+        otherEndpointAccessible = await entityExists(
+          ctx,
+          edge.dependencyKind as GraphKind,
+          edge.dependencyId,
+          "dependency",
+        );
+      } else {
+        // Entity is the dependency; check dependent
+        otherEndpointAccessible = await entityExists(
+          ctx,
+          edge.dependentKind as GraphKind,
+          edge.dependentId,
+          "dependency",
+        );
+      }
+    }
+
+    if (otherEndpointAccessible) {
+      visibleEdges.push(edge);
+    }
+  }
+
+  return visibleEdges;
 }
 
 export async function markStale(
@@ -962,7 +1040,8 @@ export async function markStale(
   input: { entity_kind: string; entity_id: string; reason?: string; stale_since?: number },
 ) {
   const entityKind = asGraphKind(input.entity_kind);
-  await ensureEntity(ctx, entityKind, input.entity_id, "dependent", "entity not found");
+  // Relax to "dependency" position so a caller can mark stale their own edges pointing at a shared entity owned by someone else
+  await ensureEntity(ctx, entityKind, input.entity_id, "dependency", "entity not found");
   const staleAt = asDate(input.stale_since) ?? now();
   await createDb(ctx.env.DB)
     .update(dependencyEdges)
@@ -980,16 +1059,40 @@ export async function markStale(
 export async function listStale(ctx: Ctx, input: { kind?: string; project_id?: string }) {
   if (input.kind) asGraphKind(input.kind);
   if (input.project_id) await ensureProject(ctx, input.project_id);
-  const filters = [eq(dependencyEdges.ownerId, ctx.user.id), isNotNull(dependencyEdges.staleAt)];
+  // Query all stale edges across all owners (drop the ownerId = caller filter from base query)
+  const filters = [isNotNull(dependencyEdges.staleAt)];
   if (input.kind) filters.push(eq(dependencyEdges.dependentKind, input.kind));
-  const rows = await createDb(ctx.env.DB)
+  const allRows = await createDb(ctx.env.DB)
     .select()
     .from(dependencyEdges)
     .where(and(...filters))
     .orderBy(desc(dependencyEdges.staleAt));
-  if (!input.project_id) return rows;
+
+  // Apply in-app filter: keep row if caller owns it, or either endpoint is caller-accessible
+  const visibleRows = [];
+  for (const row of allRows) {
+    const isOwnedByCallerEdge = row.ownerId === ctx.user.id;
+    const dependentAccessible = await entityExists(
+      ctx,
+      row.dependentKind as GraphKind,
+      row.dependentId,
+      "dependency",
+    );
+    const dependencyAccessible = await entityExists(
+      ctx,
+      row.dependencyKind as GraphKind,
+      row.dependencyId,
+      "dependency",
+    );
+    if (isOwnedByCallerEdge || dependentAccessible || dependencyAccessible) {
+      visibleRows.push(row);
+    }
+  }
+
+  // Apply project_id post-filter if provided
+  if (!input.project_id) return visibleRows;
   const out = [];
-  for (const row of rows) {
+  for (const row of visibleRows) {
     if (
       (await projectIdForEntity(ctx, row.dependentKind as GraphKind, row.dependentId)) ===
       input.project_id
@@ -1007,7 +1110,7 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
       await db
         .select({ projectId: tasks.projectId })
         .from(tasks)
-        .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
+        .where(and(eq(tasks.id, id), or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true))))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1017,7 +1120,7 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
       await db
         .select({ projectId: facts.projectId })
         .from(facts)
-        .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
+        .where(and(eq(facts.id, id), or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true))))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1027,7 +1130,12 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
       await db
         .select({ projectId: documents.projectId })
         .from(documents)
-        .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+        .where(
+          and(
+            eq(documents.id, id),
+            or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
+          ),
+        )
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1038,7 +1146,12 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
         .select({ projectId: documents.projectId })
         .from(documentChunks)
         .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-        .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
+        .where(
+          and(
+            eq(documentChunks.id, id),
+            or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
+          ),
+        )
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1048,7 +1161,12 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
       await db
         .select({ projectId: thoughts.projectId })
         .from(thoughts)
-        .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
+        .where(
+          and(
+            eq(thoughts.id, id),
+            or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
+          ),
+        )
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1058,7 +1176,12 @@ async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
       await db
         .select({ projectId: timeSeriesPoints.projectId })
         .from(timeSeriesPoints)
-        .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ctx.user.id)))
+        .where(
+          and(
+            eq(timeSeriesPoints.id, id),
+            or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
+          ),
+        )
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1111,6 +1234,20 @@ async function deleteVectors(ctx: Ctx, ids: string[]) {
   } catch {}
 }
 
+async function resyncVectorSharedMetadata(ctx: Ctx, vectorId: string) {
+  if (ctx.env.TEST_MIGRATIONS) return;
+  try {
+    const existing = await ctx.env.VECTORIZE.getByIds([vectorId]);
+    const vector = existing?.[0];
+    if (!vector) return;
+    await ctx.env.VECTORIZE.upsert([
+      { id: vectorId, values: vector.values, metadata: { ...vector.metadata, shared: true } },
+    ]);
+  } catch {
+    // best-effort re-upsert; Vectorize remains a derived, rebuildable index
+  }
+}
+
 function chunksFor(content: string) {
   const max = 1200;
   const overlap = 120;
@@ -1141,7 +1278,7 @@ export async function listProjects(ctx: Ctx) {
   return createDb(ctx.env.DB)
     .select()
     .from(projects)
-    .where(eq(projects.ownerId, ctx.user.id))
+    .where(or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true)))
     .orderBy(projects.name);
 }
 
@@ -1169,7 +1306,7 @@ export async function upsertPerson(
       updatedAt: now(),
     };
     await db.update(people).set(updated).where(eq(people.id, input.id));
-    await markGlobalPersonDownstreamStale(ctx, input.id);
+    await markDownstreamStale(ctx, "person", input.id);
     return updated;
   }
   const row = {
@@ -1303,7 +1440,7 @@ export async function updateTask(ctx: Ctx, id: string, input: Record<string, unk
 }
 
 export async function listTasks(ctx: Ctx, q: { project_id?: string; status?: string }) {
-  const filters = [eq(tasks.ownerId, ctx.user.id)];
+  const filters = [or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true))];
   if (q.project_id) filters.push(eq(tasks.projectId, q.project_id));
   if (q.status) filters.push(eq(tasks.status, q.status));
   return createDb(ctx.env.DB)
@@ -1394,6 +1531,7 @@ export async function remember(
   await upsertVector(ctx, row.id, await embed(ctx, input.content), {
     kind: "thought",
     owner_id: ctx.user.id,
+    shared: false,
     ...(input.project_id ? { project_id: input.project_id } : {}),
   });
   const cascaded = await applyProjectContagion(ctx, "thought", row.id, row.projectId);
@@ -1578,6 +1716,7 @@ export async function recordFact(
   await upsertVector(ctx, row.id, await embed(ctx, input.statement), {
     kind: "fact",
     owner_id: ctx.user.id,
+    shared: false,
     ...(input.project_id ? { project_id: input.project_id } : {}),
   });
   const created = (await db.select().from(facts).where(eq(facts.id, row.id)))[0];
@@ -1682,6 +1821,7 @@ export async function updateFact(ctx: Ctx, id: string, input: Record<string, unk
     await upsertVector(ctx, id, await embed(ctx, statement), {
       kind: "fact",
       owner_id: ctx.user.id,
+      shared: row.shared,
       ...(row.projectId ? { project_id: row.projectId } : {}),
     });
   await markDownstreamStale(ctx, "fact", id);
@@ -1783,6 +1923,7 @@ async function insertChunks(
     await upsertVector(ctx, id, await embed(ctx, chunk), {
       kind: "document_chunk",
       owner_id: ctx.user.id,
+      shared: false,
       ...(projectId ? { project_id: projectId } : {}),
     });
     i += 1;
@@ -1900,16 +2041,20 @@ async function validateSubject(ctx: Ctx, type?: string, id?: string) {
 }
 
 export async function listTimeSeriesPoints(ctx: Ctx, q: Record<string, string | undefined>) {
-  const filters = [eq(timeSeriesPoints.ownerId, ctx.user.id)];
+  const filters = [
+    or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
+  ];
   if (q.series_key) filters.push(eq(timeSeriesPoints.seriesKey, q.series_key));
   if (q.project_id) filters.push(eq(timeSeriesPoints.projectId, q.project_id));
   if (q.from) filters.push(gte(timeSeriesPoints.observedAt, asDate(Number(q.from)) ?? now()));
   if (q.to) filters.push(lte(timeSeriesPoints.observedAt, asDate(Number(q.to)) ?? now()));
   const db = createDb(ctx.env.DB);
   if (q.subject_type || q.subject_id) {
+    // For subject-edge queries, relax the edge owner filter to include edges
+    // where the point itself is shared, since a shared point's observes_subject edge
+    // may belong to the point's owner rather than the caller.
     const graphFilters = [
       ...filters,
-      eq(dependencyEdges.ownerId, ctx.user.id),
       eq(dependencyEdges.dependentKind, "time_series_point"),
       eq(dependencyEdges.dependentId, timeSeriesPoints.id),
       eq(dependencyEdges.relationship, "observes_subject"),
@@ -1946,19 +2091,53 @@ export async function recall(
   const ids: { id: string; kind: string; score: number }[] = [];
   if (!ctx.env.TEST_MIGRATIONS) {
     try {
-      const filter: Record<string, unknown> = {
+      const embedding = await embed(ctx, q.query);
+
+      // Query A: owner-scoped (caller's own rows)
+      const filterA: Record<string, unknown> = {
         owner_id: ctx.user.id,
         kind: kinds.length === 1 ? kinds[0] : { $in: kinds },
         ...(q.project_id ? { project_id: q.project_id } : {}),
       };
-      const result = (await ctx.env.VECTORIZE.query(await embed(ctx, q.query), {
+      const resultA = (await ctx.env.VECTORIZE.query(embedding, {
         topK: limit,
-        filter: filter as VectorizeVectorMetadataFilter,
+        filter: filterA as VectorizeVectorMetadataFilter,
         returnMetadata: "all",
       })) as { matches?: { id: string; score?: number; metadata?: { kind?: string } }[] };
-      for (const m of result.matches ?? [])
-        if (m.metadata?.kind && kinds.includes(m.metadata.kind))
-          ids.push({ id: m.id, kind: m.metadata.kind, score: m.score ?? 0 });
+
+      // Query B: shared-scoped (shared rows from all owners)
+      const filterB: Record<string, unknown> = {
+        shared: true,
+        kind: kinds.length === 1 ? kinds[0] : { $in: kinds },
+        ...(q.project_id ? { project_id: q.project_id } : {}),
+      };
+      const resultB = (await ctx.env.VECTORIZE.query(embedding, {
+        topK: limit,
+        filter: filterB as VectorizeVectorMetadataFilter,
+        returnMetadata: "all",
+      })) as { matches?: { id: string; score?: number; metadata?: { kind?: string } }[] };
+
+      // Merge results by id, keeping highest score per id
+      const idMap = new Map<string, { id: string; kind: string; score: number }>();
+      for (const m of resultA.matches ?? [])
+        if (m.metadata?.kind && kinds.includes(m.metadata.kind)) {
+          const key = m.id;
+          const score = m.score ?? 0;
+          if (!idMap.has(key) || (idMap.get(key)?.score ?? 0) < score) {
+            idMap.set(key, { id: m.id, kind: m.metadata.kind, score });
+          }
+        }
+      for (const m of resultB.matches ?? [])
+        if (m.metadata?.kind && kinds.includes(m.metadata.kind)) {
+          const key = m.id;
+          const score = m.score ?? 0;
+          if (!idMap.has(key) || (idMap.get(key)?.score ?? 0) < score) {
+            idMap.set(key, { id: m.id, kind: m.metadata.kind, score });
+          }
+        }
+
+      // De-duplicate and sort by score descending
+      ids.push(...Array.from(idMap.values()).sort((a, b) => b.score - a.score));
     } catch {}
   }
   const rows = await resolveRecallRows(ctx, ids, kinds, q.project_id, q.query, limit);
@@ -1984,7 +2163,7 @@ async function resolveRecallRows(
           .where(
             and(
               eq(thoughts.id, m.id),
-              eq(thoughts.ownerId, ctx.user.id),
+              or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
               projectId ? eq(thoughts.projectId, projectId) : sql`1=1`,
             ),
           )
@@ -1999,7 +2178,7 @@ async function resolveRecallRows(
           .where(
             and(
               eq(facts.id, m.id),
-              eq(facts.ownerId, ctx.user.id),
+              or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
               projectId ? eq(facts.projectId, projectId) : sql`1=1`,
             ),
           )
@@ -2015,7 +2194,7 @@ async function resolveRecallRows(
           .where(
             and(
               eq(documentChunks.id, m.id),
-              eq(documents.ownerId, ctx.user.id),
+              or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
               projectId ? eq(documents.projectId, projectId) : sql`1=1`,
             ),
           )
@@ -2039,7 +2218,7 @@ async function resolveRecallRows(
           .from(thoughts)
           .where(
             and(
-              eq(thoughts.ownerId, ctx.user.id),
+              or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
               projectId ? eq(thoughts.projectId, projectId) : sql`1=1`,
               sql`${thoughts.content} like ${like}`,
             ),
@@ -2055,7 +2234,7 @@ async function resolveRecallRows(
           .from(facts)
           .where(
             and(
-              eq(facts.ownerId, ctx.user.id),
+              or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
               projectId ? eq(facts.projectId, projectId) : sql`1=1`,
               sql`${facts.statement} like ${like}`,
             ),
@@ -2072,7 +2251,7 @@ async function resolveRecallRows(
           .innerJoin(documents, eq(documentChunks.documentId, documents.id))
           .where(
             and(
-              eq(documents.ownerId, ctx.user.id),
+              or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
               projectId ? eq(documents.projectId, projectId) : sql`1=1`,
               sql`${documentChunks.content} like ${like}`,
             ),
@@ -2091,7 +2270,7 @@ export async function listFacts(ctx: Ctx) {
   const rows = await createDb(ctx.env.DB)
     .select()
     .from(facts)
-    .where(eq(facts.ownerId, ctx.user.id))
+    .where(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)))
     .orderBy(desc(facts.createdAt));
   return Promise.all(rows.map((row) => factWithSupersession(ctx, row)));
 }
@@ -2099,14 +2278,14 @@ export async function listThoughts(ctx: Ctx) {
   return createDb(ctx.env.DB)
     .select()
     .from(thoughts)
-    .where(eq(thoughts.ownerId, ctx.user.id))
+    .where(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)))
     .orderBy(desc(thoughts.createdAt));
 }
 export async function listDocuments(ctx: Ctx) {
   return createDb(ctx.env.DB)
     .select()
     .from(documents)
-    .where(eq(documents.ownerId, ctx.user.id))
+    .where(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)))
     .orderBy(desc(documents.createdAt));
 }
 
