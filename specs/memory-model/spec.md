@@ -151,8 +151,8 @@ PBI-008 (2026-06-14) changed `people` from owner-scoped memory to a global authe
 
 - The platform baseline's bearer-token middleware and `/api/v1/health`/`/api/v1/whoami` behavior (`specs/platform-setup/spec.md`) must continue to pass unchanged — this spec only adds tables, tools, and routes.
 - The Vectorize and Workers AI bindings declared in the platform baseline (`apps/worker/wrangler.jsonc`: `VECTORIZE` binding to `brainfog-vectors`, `AI` binding) are unchanged by this spec — only the embedding model (`@cf/qwen/qwen3-embedding-0.6b`, ADR-010) and the Vectorize index's dimension (1024) change.
-- All new tables and routes except `people` must enforce `owner_id` scoping — no non-person query in this spec may return or modify another user's rows, even when given a valid ID. `people` routes remain authenticated but return the global people pool.
-- Fact derivation links and time-series subject references must not become cross-user side channels; known non-person in-model references are validated against the caller's `owner_id` before write or read. Person references validate against the global authenticated people pool.
+- All new tables and routes except `people` must enforce `owner_id` scoping for **writes** — no non-person mutation in this spec may modify another user's rows, even when given a valid ID. `people` routes remain authenticated but return the global people pool. **Amended by `specs/sharing/spec.md` (ADR-011, PBI-009):** reads may additionally return rows with `shared = true` owned by other users; this does not weaken the write-scoping guarantee.
+- Fact derivation links and time-series subject references must not become cross-user side channels; known non-person in-model references are validated against the caller's `owner_id` before write or read, except as widened by `specs/sharing/spec.md`'s cross-owner reference rule (a reference may target another owner's row only if that row is `shared = true`, and doing so marks the referencing row `shared = true` too). Person references validate against the global authenticated people pool.
 
 ### Scenarios
 

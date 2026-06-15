@@ -32,6 +32,8 @@ import {
 
 const TOKEN_A = "memory-token-a";
 const TOKEN_B = "memory-token-b";
+const TOKEN_SHARED_A = "memory-token-shared-a";
+const TOKEN_SHARED_B = "memory-token-shared-b";
 const idPattern = /^bf[0-9abcdefghjkmnpqrstvwxyz]{20}[rpkfsdct]$/;
 
 async function authFetch(path: string, init: RequestInit = {}, token = TOKEN_A) {
@@ -1914,7 +1916,462 @@ describe("memory model REST service", () => {
         "list_dependencies",
         "mark_stale",
         "list_stale",
+        "set_shared",
       ]),
     );
+  });
+});
+
+describe("Shared visibility", async () => {
+  beforeAll(async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    const db = createDb(env.DB);
+    await db.insert(users).values({ id: "user-shared-a", name: "Shared A" }).onConflictDoNothing();
+    await db.insert(users).values({ id: "user-shared-b", name: "Shared B" }).onConflictDoNothing();
+    const hashA = await hashToken(TOKEN_SHARED_A, env.BRAINFOG_TOKEN_HASH_SECRET);
+    const hashB = await hashToken(TOKEN_SHARED_B, env.BRAINFOG_TOKEN_HASH_SECRET);
+    await db
+      .insert(tokens)
+      .values({
+        id: "token-shared-a",
+        userId: "user-shared-a",
+        tokenHash: hashA,
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing();
+    await db
+      .insert(tokens)
+      .values({
+        id: "token-shared-b",
+        userId: "user-shared-b",
+        tokenHash: hashB,
+        createdAt: new Date(),
+      })
+      .onConflictDoNothing();
+  });
+
+  it("Marking a project shared cascades to its contents", async () => {
+    const projectRes = await authFetch(
+      "/api/v1/projects",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Test Project" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const project = await json<{ id: string }>(projectRes);
+
+    const taskRes = await authFetch(
+      "/api/v1/tasks",
+      {
+        method: "POST",
+        body: JSON.stringify({ title: "Test Task", project_id: project.id }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const task = await json<{ id: string }>(taskRes);
+
+    const factRes = await authFetch(
+      "/api/v1/facts",
+      {
+        method: "POST",
+        body: JSON.stringify({ statement: "Test Fact", project_id: project.id }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const fact = await json<{ id: string }>(factRes);
+
+    // Set project to shared
+    const shareRes = await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "project", entity_id: project.id, shared: true }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const shared = await json<{
+      shared: boolean;
+      cascaded: { kind: string; id: string }[];
+    }>(shareRes);
+
+    expect(shared.shared).toBe(true);
+    expect(shared.cascaded).toBeDefined();
+    expect(shared.cascaded.length).toBeGreaterThan(0);
+
+    // Verify task and fact are now shared
+    const db = createDb(env.DB);
+    const taskRow = (
+      await db.select({ shared: tasks.shared }).from(tasks).where(eq(tasks.id, task.id)).limit(1)
+    )[0];
+    expect(taskRow?.shared).toBe(true);
+
+    const factRow = (
+      await db.select({ shared: facts.shared }).from(facts).where(eq(facts.id, fact.id)).limit(1)
+    )[0];
+    expect(factRow?.shared).toBe(true);
+  });
+
+  it("Cascade follows dependency edges transitively and is cycle-safe", async () => {
+    const projectRes = await authFetch(
+      "/api/v1/projects",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Cycle Project" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const project = await json<{ id: string }>(projectRes);
+
+    // Create a fact in the project
+    const factRes = await authFetch(
+      "/api/v1/facts",
+      {
+        method: "POST",
+        body: JSON.stringify({ statement: "Fact F1", project_id: project.id }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const fact = await json<{ id: string }>(factRes);
+
+    // Create a thought not in the project
+    const thoughtRes = await authFetch(
+      "/api/v1/thoughts",
+      {
+        method: "POST",
+        body: JSON.stringify({ content: "Thought T1" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const thought = await json<{ id: string }>(thoughtRes);
+
+    // Create circular dependencies: F1 -> T1, T1 -> F1
+    await authFetch(
+      "/api/v1/dependencies",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "fact", id: fact.id },
+          dependency: { kind: "thought", id: thought.id },
+          relationship: "derived_from",
+        }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    await authFetch(
+      "/api/v1/dependencies",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "thought", id: thought.id },
+          dependency: { kind: "fact", id: fact.id },
+          relationship: "derived_from",
+        }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    // Mark project shared
+    const shareRes = await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "project", entity_id: project.id, shared: true }),
+      },
+      TOKEN_SHARED_A,
+    );
+    expect(shareRes.status).toBeLessThan(300);
+
+    // Both fact and thought should be marked shared
+    const db = createDb(env.DB);
+    const factRow = (
+      await db.select({ shared: facts.shared }).from(facts).where(eq(facts.id, fact.id)).limit(1)
+    )[0];
+    expect(factRow?.shared).toBe(true);
+
+    const thoughtRow = (
+      await db
+        .select({ shared: thoughts.shared })
+        .from(thoughts)
+        .where(eq(thoughts.id, thought.id))
+        .limit(1)
+    )[0];
+    expect(thoughtRow?.shared).toBe(true);
+  });
+
+  it("Cross-owner dependency edge is rejected when target is not shared", async () => {
+    // User A creates a private fact
+    const aFactRes = await authFetch(
+      "/api/v1/facts",
+      {
+        method: "POST",
+        body: JSON.stringify({ statement: "User A Private Fact" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const aFact = await json<{ id: string }>(aFactRes);
+
+    // User B creates a thought first
+    const bThoughtRes = await authFetch(
+      "/api/v1/thoughts",
+      {
+        method: "POST",
+        body: JSON.stringify({ content: "User B Test Thought" }),
+      },
+      TOKEN_SHARED_B,
+    );
+    const bThought = await json<{ id: string }>(bThoughtRes);
+
+    // User B tries to create a dependency from their thought to User A's private fact
+    const depRes = await authFetch(
+      "/api/v1/dependencies",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "thought", id: bThought.id },
+          dependency: { kind: "fact", id: aFact.id },
+          relationship: "derived_from",
+        }),
+      },
+      TOKEN_SHARED_B,
+    );
+    expect(depRes.status).toBe(404);
+  });
+
+  it("Cross-owner dependency edge shares the dependent when target is shared", async () => {
+    // User A creates and shares a fact
+    const aFactRes = await authFetch(
+      "/api/v1/facts",
+      {
+        method: "POST",
+        body: JSON.stringify({ statement: "User A Shared Fact" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const aFact = await json<{ id: string }>(aFactRes);
+
+    await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "fact", entity_id: aFact.id, shared: true }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    // User B creates a thought
+    const bThoughtRes = await authFetch(
+      "/api/v1/thoughts",
+      {
+        method: "POST",
+        body: JSON.stringify({ content: "User B Thought" }),
+      },
+      TOKEN_SHARED_B,
+    );
+    const bThought = await json<{ id: string }>(bThoughtRes);
+
+    // User B creates a dependency from their thought to User A's shared fact
+    const depRes = await authFetch(
+      "/api/v1/dependencies",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          dependent: { kind: "thought", id: bThought.id },
+          dependency: { kind: "fact", id: aFact.id },
+          relationship: "derived_from",
+        }),
+      },
+      TOKEN_SHARED_B,
+    );
+    expect(depRes.status).toBeLessThan(300);
+    const dep = await json<{
+      cascaded?: { kind: string; id: string }[];
+    }>(depRes);
+
+    // User B's thought should now be shared
+    expect(dep.cascaded).toBeDefined();
+    if (dep.cascaded) {
+      expect(dep.cascaded.length).toBeGreaterThan(0);
+    }
+
+    const db = createDb(env.DB);
+    const thoughtRow = (
+      await db
+        .select({ shared: thoughts.shared, ownerId: thoughts.ownerId })
+        .from(thoughts)
+        .where(eq(thoughts.id, bThought.id))
+        .limit(1)
+    )[0];
+    expect(thoughtRow?.shared).toBe(true);
+    expect(thoughtRow?.ownerId).toBe("user-shared-b");
+  });
+
+  it("Referencing a global person does not trigger sharing", async () => {
+    // Create a global person
+    const personRes = await authFetch(
+      "/api/v1/people",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Test Person" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const person = await json<{ id: string }>(personRes);
+
+    // User B creates a thought and links to the person
+    const thoughtRes = await authFetch(
+      "/api/v1/thoughts",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          content: "Thought about person",
+          links: { people_ids: [person.id] },
+        }),
+      },
+      TOKEN_SHARED_B,
+    );
+    const thought = await json<{ id: string }>(thoughtRes);
+
+    // Thought should remain non-shared
+    const db = createDb(env.DB);
+    const thoughtRow = (
+      await db
+        .select({ shared: thoughts.shared })
+        .from(thoughts)
+        .where(eq(thoughts.id, thought.id))
+        .limit(1)
+    )[0];
+    expect(thoughtRow?.shared).toBe(false);
+  });
+
+  it("Assigning project_id to a shared project shares the new row", async () => {
+    // User A creates and shares a project
+    const projectRes = await authFetch(
+      "/api/v1/projects",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Shared Project for Contagion" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const project = await json<{ id: string }>(projectRes);
+
+    await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "project", entity_id: project.id, shared: true }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    // User B creates a task with the shared project_id
+    const taskRes = await authFetch(
+      "/api/v1/tasks",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Task in Shared Project",
+          project_id: project.id,
+        }),
+      },
+      TOKEN_SHARED_B,
+    );
+    const task = await json<{
+      id: string;
+      shared?: boolean;
+      cascaded?: { kind: string; id: string }[];
+    }>(taskRes);
+
+    // Task should be shared and include cascaded response
+    expect(task.cascaded).toBeDefined();
+    expect(task.cascaded?.length).toBeGreaterThan(0);
+
+    // Verify in database that task is owned by user B and is shared
+    const db = createDb(env.DB);
+    const taskRow = (
+      await db
+        .select({ shared: tasks.shared, ownerId: tasks.ownerId })
+        .from(tasks)
+        .where(eq(tasks.id, task.id))
+        .limit(1)
+    )[0];
+    expect(taskRow?.shared).toBe(true);
+    expect(taskRow?.ownerId).toBe("user-shared-b");
+  });
+
+  it("set_shared is owner-only", async () => {
+    // User A creates a task
+    const taskRes = await authFetch(
+      "/api/v1/tasks",
+      {
+        method: "POST",
+        body: JSON.stringify({ title: "User A Task" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const task = await json<{ id: string }>(taskRes);
+
+    // User B tries to share it
+    const shareRes = await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "task", entity_id: task.id, shared: true }),
+      },
+      TOKEN_SHARED_B,
+    );
+    expect(shareRes.status).toBe(404);
+  });
+
+  it("Un-sharing the root does not retract cascaded shares", async () => {
+    // User A creates a project with a task
+    const projectRes = await authFetch(
+      "/api/v1/projects",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "Unshare Test Project" }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const project = await json<{ id: string }>(projectRes);
+
+    const taskRes = await authFetch(
+      "/api/v1/tasks",
+      {
+        method: "POST",
+        body: JSON.stringify({ title: "Cascaded Task", project_id: project.id }),
+      },
+      TOKEN_SHARED_A,
+    );
+    const task = await json<{ id: string }>(taskRes);
+
+    // Share the project
+    await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "project", entity_id: project.id, shared: true }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    // Unshare the project
+    await authFetch(
+      "/api/v1/shared",
+      {
+        method: "POST",
+        body: JSON.stringify({ entity_kind: "project", entity_id: project.id, shared: false }),
+      },
+      TOKEN_SHARED_A,
+    );
+
+    // Task should still be shared (cascade not retracted)
+    const db = createDb(env.DB);
+    const taskRow = (
+      await db.select({ shared: tasks.shared }).from(tasks).where(eq(tasks.id, task.id)).limit(1)
+    )[0];
+    expect(taskRow?.shared).toBe(true);
   });
 });

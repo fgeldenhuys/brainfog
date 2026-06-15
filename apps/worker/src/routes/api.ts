@@ -29,6 +29,7 @@ import {
   recordTimeSeriesPoint,
   remember,
   setSelfPerson,
+  setShared,
   updateDocument,
   updateFact,
   updateTask,
@@ -264,6 +265,13 @@ apiRoutes.get(
         project_id: c.req.query("project_id"),
       }),
     ),
+  ),
+);
+
+apiRoutes.post(
+  "/shared",
+  route(async (c) =>
+    c.json(await setShared(ctx(c), (await body(c)) as Parameters<typeof setShared>[1])),
   ),
 );
 

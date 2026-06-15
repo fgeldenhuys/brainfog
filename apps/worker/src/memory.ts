@@ -101,7 +101,9 @@ async function ensureProject(ctx: Ctx, id?: string | null) {
     await createDb(ctx.env.DB)
       .select({ id: projects.id })
       .from(projects)
-      .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
+      .where(
+        and(eq(projects.id, id), or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true))),
+      )
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "project not found");
@@ -119,53 +121,381 @@ function asRelationship(value: unknown): Relationship {
   throw new MemoryError(400, "invalid relationship");
 }
 
-async function entityExists(ctx: Ctx, kind: GraphKind, id: string) {
+async function entityExists(
+  ctx: Ctx,
+  kind: GraphKind,
+  id: string,
+  position: "dependent" | "dependency" = "dependency",
+) {
   const db = createDb(ctx.env.DB);
+
+  // For "dependent" position (entity being created/updated), always strict owner check.
+  // For "dependency" position (entity being referenced), allow OR shared = true.
+  const ownerCheck =
+    position === "dependent"
+      ? eq(projects.ownerId, ctx.user.id)
+      : or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true));
+
   const checks: Record<GraphKind, Promise<unknown[]>> = {
     project: db
       .select({ id: projects.id })
       .from(projects)
-      .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
+      .where(and(eq(projects.id, id), ownerCheck))
       .limit(1),
     person: db.select({ id: people.id }).from(people).where(eq(people.id, id)).limit(1),
     task: db
       .select({ id: tasks.id })
       .from(tasks)
-      .where(and(eq(tasks.id, id), eq(tasks.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(tasks.id, id),
+          position === "dependent"
+            ? eq(tasks.ownerId, ctx.user.id)
+            : or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true)),
+        ),
+      )
       .limit(1),
     fact: db
       .select({ id: facts.id })
       .from(facts)
-      .where(and(eq(facts.id, id), eq(facts.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(facts.id, id),
+          position === "dependent"
+            ? eq(facts.ownerId, ctx.user.id)
+            : or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
+        ),
+      )
       .limit(1),
     time_series_point: db
       .select({ id: timeSeriesPoints.id })
       .from(timeSeriesPoints)
-      .where(and(eq(timeSeriesPoints.id, id), eq(timeSeriesPoints.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(timeSeriesPoints.id, id),
+          position === "dependent"
+            ? eq(timeSeriesPoints.ownerId, ctx.user.id)
+            : or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
+        ),
+      )
       .limit(1),
     document: db
       .select({ id: documents.id })
       .from(documents)
-      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(documents.id, id),
+          position === "dependent"
+            ? eq(documents.ownerId, ctx.user.id)
+            : or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
+        ),
+      )
       .limit(1),
     document_chunk: db
       .select({ id: documentChunks.id })
       .from(documentChunks)
       .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-      .where(and(eq(documentChunks.id, id), eq(documents.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(documentChunks.id, id),
+          position === "dependent"
+            ? eq(documents.ownerId, ctx.user.id)
+            : or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
+        ),
+      )
       .limit(1),
     thought: db
       .select({ id: thoughts.id })
       .from(thoughts)
-      .where(and(eq(thoughts.id, id), eq(thoughts.ownerId, ctx.user.id)))
+      .where(
+        and(
+          eq(thoughts.id, id),
+          position === "dependent"
+            ? eq(thoughts.ownerId, ctx.user.id)
+            : or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
+        ),
+      )
       .limit(1),
   };
   return Boolean((await checks[kind])[0]);
 }
 
-async function ensureEntity(ctx: Ctx, kind: GraphKind, id: string, message?: string) {
-  if (!(await entityExists(ctx, kind, id)))
-    throw new MemoryError(404, message ?? "entity not found");
+async function ensureEntity(
+  ctx: Ctx,
+  kind: GraphKind,
+  id: string,
+  position?: "dependent" | "dependency",
+  message?: string,
+): Promise<void>;
+async function ensureEntity(ctx: Ctx, kind: GraphKind, id: string, message?: string): Promise<void>;
+async function ensureEntity(
+  ctx: Ctx,
+  kind: GraphKind,
+  id: string,
+  positionOrMessage?: string | "dependent" | "dependency",
+  message?: string,
+) {
+  let position: "dependent" | "dependency" = "dependency";
+  let finalMessage: string | undefined;
+
+  if (positionOrMessage === "dependent" || positionOrMessage === "dependency") {
+    position = positionOrMessage;
+    finalMessage = message;
+  } else {
+    finalMessage = positionOrMessage as string | undefined;
+  }
+
+  if (!(await entityExists(ctx, kind, id, position)))
+    throw new MemoryError(404, finalMessage ?? "entity not found");
+}
+
+// Get entity owner ID for a given kind and id
+async function getEntityOwner(
+  db: ReturnType<typeof createDb>,
+  kind: GraphKind,
+  id: string,
+): Promise<string | null> {
+  const queries: Record<GraphKind, Promise<unknown[]>> = {
+    project: db.select({ ownerId: projects.ownerId }).from(projects).where(eq(projects.id, id)),
+    person: db.select({ ownerId: sql`NULL` }).from(people).where(eq(people.id, id)),
+    task: db.select({ ownerId: tasks.ownerId }).from(tasks).where(eq(tasks.id, id)),
+    fact: db.select({ ownerId: facts.ownerId }).from(facts).where(eq(facts.id, id)),
+    time_series_point: db
+      .select({ ownerId: timeSeriesPoints.ownerId })
+      .from(timeSeriesPoints)
+      .where(eq(timeSeriesPoints.id, id)),
+    document: db.select({ ownerId: documents.ownerId }).from(documents).where(eq(documents.id, id)),
+    document_chunk: db
+      .select({ ownerId: documents.ownerId })
+      .from(documentChunks)
+      .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+      .where(eq(documentChunks.id, id)),
+    thought: db.select({ ownerId: thoughts.ownerId }).from(thoughts).where(eq(thoughts.id, id)),
+  };
+  const result = (await queries[kind])[0] as Record<string, unknown> | undefined;
+  return (result?.ownerId as string | null | undefined) ?? null;
+}
+
+// Get entity shared status
+async function getEntityShared(
+  db: ReturnType<typeof createDb>,
+  kind: GraphKind,
+  id: string,
+): Promise<boolean> {
+  const queries: Record<GraphKind, Promise<unknown[]>> = {
+    project: db.select({ shared: projects.shared }).from(projects).where(eq(projects.id, id)),
+    person: db.select({ shared: sql`true` }).from(people).where(eq(people.id, id)),
+    task: db.select({ shared: tasks.shared }).from(tasks).where(eq(tasks.id, id)),
+    fact: db.select({ shared: facts.shared }).from(facts).where(eq(facts.id, id)),
+    time_series_point: db
+      .select({ shared: timeSeriesPoints.shared })
+      .from(timeSeriesPoints)
+      .where(eq(timeSeriesPoints.id, id)),
+    document: db.select({ shared: documents.shared }).from(documents).where(eq(documents.id, id)),
+    document_chunk: db
+      .select({ shared: documents.shared })
+      .from(documentChunks)
+      .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+      .where(eq(documentChunks.id, id)),
+    thought: db.select({ shared: thoughts.shared }).from(thoughts).where(eq(thoughts.id, id)),
+  };
+  const result = (await queries[kind])[0] as Record<string, unknown> | undefined;
+  return Boolean(result?.shared);
+}
+
+// Cascade-on-share algorithm: mark entities reachable from a target as shared
+async function cascadeShare(
+  ctx: Ctx,
+  targetKind: GraphKind,
+  targetId: string,
+): Promise<{ kind: GraphKind; id: string }[]> {
+  const db = createDb(ctx.env.DB);
+  const cascaded: Map<string, { kind: GraphKind; id: string }> = new Map();
+  const visited = new Set<string>();
+  const queue: { kind: GraphKind; id: string }[] = [{ kind: targetKind, id: targetId }];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) break;
+    const key = `${current.kind}:${current.id}`;
+    const isTarget = current.kind === targetKind && current.id === targetId;
+
+    if (visited.has(key)) continue;
+    visited.add(key);
+
+    // Skip if already shared (except for the original target)
+    if (!isTarget) {
+      const isAlreadyShared = await getEntityShared(db, current.kind, current.id);
+      if (isAlreadyShared) continue;
+    }
+
+    // Set shared = true on the entity
+    if (current.kind === "project") {
+      await db
+        .update(projects)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(projects.id, current.id));
+    } else if (current.kind === "task") {
+      await db
+        .update(tasks)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(tasks.id, current.id));
+    } else if (current.kind === "fact") {
+      await db
+        .update(facts)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(facts.id, current.id));
+    } else if (current.kind === "document") {
+      await db
+        .update(documents)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(documents.id, current.id));
+    } else if (current.kind === "thought") {
+      await db
+        .update(thoughts)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(thoughts.id, current.id));
+    } else if (current.kind === "time_series_point") {
+      await db
+        .update(timeSeriesPoints)
+        .set({ shared: true, updatedAt: now() })
+        .where(eq(timeSeriesPoints.id, current.id));
+    } else if (current.kind === "document_chunk") {
+      // document_chunks inherit shared from their parent document, so update the parent
+      const docChunk = (
+        await db
+          .select({ documentId: documentChunks.documentId })
+          .from(documentChunks)
+          .where(eq(documentChunks.id, current.id))
+          .limit(1)
+      )[0];
+      if (docChunk) {
+        await db
+          .update(documents)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(documents.id, docChunk.documentId));
+        cascaded.set(`document:${docChunk.documentId}`, {
+          kind: "document",
+          id: docChunk.documentId,
+        });
+      }
+      continue; // Skip further processing for chunks
+    }
+
+    // Track cascaded changes (skip person and original target)
+    if (current.kind !== "person" && !isTarget) {
+      cascaded.set(key, current);
+    }
+
+    // Project containment: enqueue all project-scoped rows
+    if (current.kind === "project") {
+      const contained = await db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(eq(tasks.projectId, current.id));
+      for (const row of contained) queue.push({ kind: "task", id: row.id });
+
+      const facts_ = await db
+        .select({ id: facts.id })
+        .from(facts)
+        .where(eq(facts.projectId, current.id));
+      for (const row of facts_) queue.push({ kind: "fact", id: row.id });
+
+      const docs = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(eq(documents.projectId, current.id));
+      for (const row of docs) queue.push({ kind: "document", id: row.id });
+
+      const thoughts_ = await db
+        .select({ id: thoughts.id })
+        .from(thoughts)
+        .where(eq(thoughts.projectId, current.id));
+      for (const row of thoughts_) queue.push({ kind: "thought", id: row.id });
+
+      const points = await db
+        .select({ id: timeSeriesPoints.id })
+        .from(timeSeriesPoints)
+        .where(eq(timeSeriesPoints.projectId, current.id));
+      for (const row of points) queue.push({ kind: "time_series_point", id: row.id });
+    }
+
+    // Graph dependencies: enqueue all entities this one depends on
+    const dependencies = await db
+      .select({
+        dependencyKind: dependencyEdges.dependencyKind,
+        dependencyId: dependencyEdges.dependencyId,
+      })
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.dependentKind, current.kind),
+          eq(dependencyEdges.dependentId, current.id),
+        ),
+      );
+    for (const dep of dependencies) {
+      queue.push({ kind: dep.dependencyKind as GraphKind, id: dep.dependencyId });
+    }
+  }
+
+  return Array.from(cascaded.values());
+}
+
+// Apply project contagion: if a project belongs to a different user and is shared,
+// mark the entity as shared and cascade
+async function applyProjectContagion(
+  ctx: Ctx,
+  entityKind: GraphKind,
+  entityId: string,
+  projectId: string | null | undefined,
+): Promise<{ kind: GraphKind; id: string }[]> {
+  if (!projectId) return [];
+
+  const db = createDb(ctx.env.DB);
+  const projectOwner = await getEntityOwner(db, "project", projectId);
+
+  // Only apply contagion if project is owned by a different user
+  if (!projectOwner || projectOwner === ctx.user.id) return [];
+
+  const projectIsShared = await getEntityShared(db, "project", projectId);
+  if (!projectIsShared) return [];
+
+  // Project is owned by another user and is shared - apply contagion
+  const entityIsShared = await getEntityShared(db, entityKind, entityId);
+  if (entityIsShared) return [];
+
+  // Mark entity as shared
+  if (entityKind === "project") {
+    await db
+      .update(projects)
+      .set({ shared: true, updatedAt: now() })
+      .where(eq(projects.id, entityId));
+  } else if (entityKind === "task") {
+    await db.update(tasks).set({ shared: true, updatedAt: now() }).where(eq(tasks.id, entityId));
+  } else if (entityKind === "fact") {
+    await db.update(facts).set({ shared: true, updatedAt: now() }).where(eq(facts.id, entityId));
+  } else if (entityKind === "document") {
+    await db
+      .update(documents)
+      .set({ shared: true, updatedAt: now() })
+      .where(eq(documents.id, entityId));
+  } else if (entityKind === "thought") {
+    await db
+      .update(thoughts)
+      .set({ shared: true, updatedAt: now() })
+      .where(eq(thoughts.id, entityId));
+  } else if (entityKind === "time_series_point") {
+    await db
+      .update(timeSeriesPoints)
+      .set({ shared: true, updatedAt: now() })
+      .where(eq(timeSeriesPoints.id, entityId));
+  }
+
+  const cascaded = [{ kind: entityKind, id: entityId }];
+  const cascadedFromEntity = await cascadeShare(ctx, entityKind, entityId);
+  cascaded.push(...cascadedFromEntity);
+
+  return cascaded;
 }
 
 export async function createDependency(
@@ -176,17 +506,53 @@ export async function createDependency(
     relationship: string;
     metadata?: Record<string, unknown>;
   },
-) {
+): Promise<Record<string, unknown> & { cascaded?: { kind: GraphKind; id: string }[] }> {
   const dependentKind = asGraphKind(input.dependent?.kind);
   const dependencyKind = asGraphKind(input.dependency?.kind);
   const relationship = asRelationship(input.relationship);
   const dependentId = String(input.dependent?.id ?? "");
   const dependencyId = String(input.dependency?.id ?? "");
   if (!dependentId || !dependencyId) throw new MemoryError(400, "missing dependency endpoint");
-  await ensureEntity(ctx, dependentKind, dependentId, "dependent not found");
-  await ensureEntity(ctx, dependencyKind, dependencyId, "dependency not found");
+
+  // Dependent must always be owned by caller (strict)
+  await ensureEntity(ctx, dependentKind, dependentId, "dependent", "dependent not found");
+
+  // Check if dependent is owned by caller (double-check)
+  const db = createDb(ctx.env.DB);
+  const dependentOwner = await getEntityOwner(db, dependentKind, dependentId);
+  if (dependentOwner !== ctx.user.id)
+    throw new MemoryError(403, "cannot modify dependent not owned by caller");
+
+  // Dependency can be owned by caller or be shared (unless person/document_chunk exemptions)
+  const dependencyOwner = await getEntityOwner(db, dependencyKind, dependencyId);
+  const dependencyIsShared = await getEntityShared(db, dependencyKind, dependencyId);
+
+  // Cross-owner reference rule with exemptions
+  let contagion = false;
+  if (dependencyOwner && dependencyOwner !== ctx.user.id) {
+    // Exemption: person references never trigger contagion
+    if (dependencyKind === "person") {
+      // Allowed, no contagion
+    }
+    // Exemption: document_chunk via parent document
+    else if (dependencyKind === "document_chunk") {
+      // Allowed only if parent document is shared, no contagion
+      if (!dependencyIsShared) throw new MemoryError(404, "dependency not found");
+    }
+    // Non-exempted cross-owner reference
+    else {
+      // Allowed only if dependency is shared
+      if (!dependencyIsShared) throw new MemoryError(404, "dependency not found");
+      contagion = true;
+    }
+  }
+
+  // Verify dependency exists
+  await ensureEntity(ctx, dependencyKind, dependencyId, "dependency", "dependency not found");
+
   if (dependentKind === dependencyKind && dependentId === dependencyId)
     throw new MemoryError(400, "dependency cannot point to itself");
+
   const row = {
     id: createId("dependencyEdge"),
     ownerId: ctx.user.id,
@@ -198,23 +564,75 @@ export async function createDependency(
     relationship,
     metadata: input.metadata ?? {},
   };
-  await createDb(ctx.env.DB).insert(dependencyEdges).values(row).onConflictDoNothing();
-  return (
-    await createDb(ctx.env.DB)
-      .select()
-      .from(dependencyEdges)
-      .where(
-        and(
-          eq(dependencyEdges.ownerId, ctx.user.id),
-          eq(dependencyEdges.dependentKind, dependentKind),
-          eq(dependencyEdges.dependentId, dependentId),
-          eq(dependencyEdges.dependencyKind, dependencyKind),
-          eq(dependencyEdges.dependencyId, dependencyId),
-          eq(dependencyEdges.relationship, relationship),
-        ),
-      )
-      .limit(1)
-  )[0];
+  await db.insert(dependencyEdges).values(row).onConflictDoNothing();
+
+  // If contagion, mark dependent as shared and cascade
+  let cascaded: { kind: GraphKind; id: string }[] = [];
+  if (contagion) {
+    const dependentIsShared = await getEntityShared(db, dependentKind, dependentId);
+    if (!dependentIsShared) {
+      // Mark dependent as shared
+      if (dependentKind === "project") {
+        await db
+          .update(projects)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(projects.id, dependentId));
+      } else if (dependentKind === "task") {
+        await db
+          .update(tasks)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(tasks.id, dependentId));
+      } else if (dependentKind === "fact") {
+        await db
+          .update(facts)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(facts.id, dependentId));
+      } else if (dependentKind === "document") {
+        await db
+          .update(documents)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(documents.id, dependentId));
+      } else if (dependentKind === "thought") {
+        await db
+          .update(thoughts)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(thoughts.id, dependentId));
+      } else if (dependentKind === "time_series_point") {
+        await db
+          .update(timeSeriesPoints)
+          .set({ shared: true, updatedAt: now() })
+          .where(eq(timeSeriesPoints.id, dependentId));
+      }
+      cascaded.push({ kind: dependentKind, id: dependentId });
+
+      // Run cascade from dependent
+      const cascadedFromDependent = await cascadeShare(ctx, dependentKind, dependentId);
+      cascaded = cascaded.concat(cascadedFromDependent);
+    }
+  }
+
+  const edges = await db
+    .select()
+    .from(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependentKind, dependentKind),
+        eq(dependencyEdges.dependentId, dependentId),
+        eq(dependencyEdges.dependencyKind, dependencyKind),
+        eq(dependencyEdges.dependencyId, dependencyId),
+        eq(dependencyEdges.relationship, relationship),
+      ),
+    )
+    .limit(1);
+  const edge = edges[0];
+
+  if (cascaded.length > 0) {
+    return { ...edge, cascaded } as Record<string, unknown> & {
+      cascaded: { kind: GraphKind; id: string }[];
+    };
+  }
+  return edge as Record<string, unknown>;
 }
 
 async function replaceDependencies(
@@ -367,6 +785,125 @@ async function cleanDocumentChunkGraphEdges(
     );
 }
 
+// Kinds that support shared flag
+const shareableKinds = ["project", "task", "fact", "document", "thought", "time_series_point"];
+
+export async function setShared(
+  ctx: Ctx,
+  input: { entity_kind: string; entity_id: string; shared: boolean },
+) {
+  const entityKind = asGraphKind(input.entity_kind);
+
+  // Validate that this kind supports shared flag
+  if (!(shareableKinds as readonly string[]).includes(entityKind))
+    throw new MemoryError(400, "entity kind does not support shared flag");
+
+  const entityId = String(input.entity_id ?? "");
+  if (!entityId) throw new MemoryError(400, "missing entity_id");
+
+  const db = createDb(ctx.env.DB);
+
+  // Entity must be owned by caller (strict - no shared=true relaxation)
+  const owner = await getEntityOwner(db, entityKind, entityId);
+  if (owner !== ctx.user.id) throw new MemoryError(404, "entity not found");
+
+  let result: Record<string, unknown> | undefined;
+  const timestamp = now();
+
+  if (input.shared) {
+    // Setting to true: run cascade
+    // First, mark the target itself as shared
+    if (entityKind === "project") {
+      await db
+        .update(projects)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(projects.id, entityId));
+      result = (await db.select().from(projects).where(eq(projects.id, entityId)).limit(1))[0];
+    } else if (entityKind === "task") {
+      await db
+        .update(tasks)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(tasks.id, entityId));
+      result = (await db.select().from(tasks).where(eq(tasks.id, entityId)).limit(1))[0];
+    } else if (entityKind === "fact") {
+      await db
+        .update(facts)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(facts.id, entityId));
+      result = (await db.select().from(facts).where(eq(facts.id, entityId)).limit(1))[0];
+    } else if (entityKind === "document") {
+      await db
+        .update(documents)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(documents.id, entityId));
+      result = (await db.select().from(documents).where(eq(documents.id, entityId)).limit(1))[0];
+    } else if (entityKind === "thought") {
+      await db
+        .update(thoughts)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(thoughts.id, entityId));
+      result = (await db.select().from(thoughts).where(eq(thoughts.id, entityId)).limit(1))[0];
+    } else if (entityKind === "time_series_point") {
+      await db
+        .update(timeSeriesPoints)
+        .set({ shared: true, updatedAt: timestamp })
+        .where(eq(timeSeriesPoints.id, entityId));
+      result = (
+        await db.select().from(timeSeriesPoints).where(eq(timeSeriesPoints.id, entityId)).limit(1)
+      )[0];
+    }
+
+    // Run cascade
+    const cascaded = await cascadeShare(ctx, entityKind, entityId);
+    return { ...result, cascaded } as Record<string, unknown> & {
+      cascaded: { kind: GraphKind; id: string }[];
+    };
+  } else {
+    // Setting to false: only flip the target's own flag, no cascade reversal
+    if (entityKind === "project") {
+      await db
+        .update(projects)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(projects.id, entityId));
+      result = (await db.select().from(projects).where(eq(projects.id, entityId)).limit(1))[0];
+    } else if (entityKind === "task") {
+      await db
+        .update(tasks)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(tasks.id, entityId));
+      result = (await db.select().from(tasks).where(eq(tasks.id, entityId)).limit(1))[0];
+    } else if (entityKind === "fact") {
+      await db
+        .update(facts)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(facts.id, entityId));
+      result = (await db.select().from(facts).where(eq(facts.id, entityId)).limit(1))[0];
+    } else if (entityKind === "document") {
+      await db
+        .update(documents)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(documents.id, entityId));
+      result = (await db.select().from(documents).where(eq(documents.id, entityId)).limit(1))[0];
+    } else if (entityKind === "thought") {
+      await db
+        .update(thoughts)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(thoughts.id, entityId));
+      result = (await db.select().from(thoughts).where(eq(thoughts.id, entityId)).limit(1))[0];
+    } else if (entityKind === "time_series_point") {
+      await db
+        .update(timeSeriesPoints)
+        .set({ shared: false, updatedAt: timestamp })
+        .where(eq(timeSeriesPoints.id, entityId));
+      result = (
+        await db.select().from(timeSeriesPoints).where(eq(timeSeriesPoints.id, entityId)).limit(1)
+      )[0];
+    }
+
+    return result as Record<string, unknown>;
+  }
+}
+
 export async function deleteDependency(ctx: Ctx, id: string) {
   const db = createDb(ctx.env.DB);
   const row = (
@@ -390,7 +927,7 @@ export async function listDependencies(
   if (!["upstream", "downstream", "both"].includes(direction))
     throw new MemoryError(400, "invalid direction");
   if (input.relationship) asRelationship(input.relationship);
-  await ensureEntity(ctx, entityKind, input.entity_id, "entity not found");
+  await ensureEntity(ctx, entityKind, input.entity_id, "dependent", "entity not found");
   const filters = [eq(dependencyEdges.ownerId, ctx.user.id)];
   if (direction === "upstream") {
     filters.push(eq(dependencyEdges.dependentKind, entityKind));
@@ -425,7 +962,7 @@ export async function markStale(
   input: { entity_kind: string; entity_id: string; reason?: string; stale_since?: number },
 ) {
   const entityKind = asGraphKind(input.entity_kind);
-  await ensureEntity(ctx, entityKind, input.entity_id, "entity not found");
+  await ensureEntity(ctx, entityKind, input.entity_id, "dependent", "entity not found");
   const staleAt = asDate(input.stale_since) ?? now();
   await createDb(ctx.env.DB)
     .update(dependencyEdges)
@@ -722,6 +1259,10 @@ export async function createTask(ctx: Ctx, input: Record<string, unknown>) {
     recurrence: validateRecurrence(input.recurrence),
   };
   await createDb(ctx.env.DB).insert(tasks).values(row);
+  const cascaded = await applyProjectContagion(ctx, "task", row.id, row.projectId);
+  if (cascaded.length > 0) {
+    return { ...row, cascaded };
+  }
   return row;
 }
 
@@ -752,8 +1293,13 @@ export async function updateTask(ctx: Ctx, id: string, input: Record<string, unk
       updatedAt: now(),
     })
     .where(eq(tasks.id, id));
+  const cascaded = hasProjectId ? await applyProjectContagion(ctx, "task", id, projectId) : [];
   await markDownstreamStale(ctx, "task", id);
-  return (await db.select().from(tasks).where(eq(tasks.id, id)))[0];
+  const updated = (await db.select().from(tasks).where(eq(tasks.id, id)))[0];
+  if (cascaded.length > 0) {
+    return { ...updated, cascaded };
+  }
+  return updated;
 }
 
 export async function listTasks(ctx: Ctx, q: { project_id?: string; status?: string }) {
@@ -850,6 +1396,10 @@ export async function remember(
     owner_id: ctx.user.id,
     ...(input.project_id ? { project_id: input.project_id } : {}),
   });
+  const cascaded = await applyProjectContagion(ctx, "thought", row.id, row.projectId);
+  if (cascaded.length > 0) {
+    return { ...row, cascaded };
+  }
   return row;
 }
 
@@ -1032,7 +1582,12 @@ export async function recordFact(
   });
   const created = (await db.select().from(facts).where(eq(facts.id, row.id)))[0];
   if (!created) throw new MemoryError(500, "fact insert failed");
-  return factWithSupersession(ctx, created);
+  const cascaded = await applyProjectContagion(ctx, "fact", row.id, row.projectId);
+  const result = factWithSupersession(ctx, created);
+  if (cascaded.length > 0) {
+    return { ...result, cascaded };
+  }
+  return result;
 }
 
 export async function updateFact(ctx: Ctx, id: string, input: Record<string, unknown>) {
@@ -1166,6 +1721,10 @@ export async function addDocument(
   await db.insert(documents).values(row);
   await applyDocumentDerivations(ctx, id, input.derived_from);
   await insertChunks(ctx, id, input.content, input.project_id ?? null);
+  const cascaded = await applyProjectContagion(ctx, "document", row.id, row.projectId);
+  if (cascaded.length > 0) {
+    return { ...row, cascaded };
+  }
   return row;
 }
 
@@ -1310,17 +1869,29 @@ export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unkn
     metadata: (input.metadata as Record<string, unknown> | undefined) ?? {},
   };
   await createDb(ctx.env.DB).insert(timeSeriesPoints).values(row);
-  if (input.subject_type && input.subject_id)
-    await createDependency(ctx, {
+  let cascaded: { kind: GraphKind; id: string }[] = [];
+  if (input.subject_type && input.subject_id) {
+    const depResult = await createDependency(ctx, {
       dependent: { kind: "time_series_point", id: row.id },
       dependency: { kind: asGraphKind(input.subject_type), id: String(input.subject_id) },
       relationship: "observes_subject",
     });
-  return {
+    if (depResult.cascaded) {
+      cascaded = depResult.cascaded;
+    }
+  }
+  if (!cascaded.length) {
+    cascaded = await applyProjectContagion(ctx, "time_series_point", row.id, row.projectId);
+  }
+  const result = {
     ...row,
     subjectType: (input.subject_type as string | undefined) ?? null,
     subjectId: (input.subject_id as string | undefined) ?? null,
   };
+  if (cascaded.length > 0) {
+    return { ...result, cascaded };
+  }
+  return result;
 }
 
 async function validateSubject(ctx: Ctx, type?: string, id?: string) {

@@ -70,7 +70,7 @@ PBI-005 (`tasks/PBI-005-dependency-graph.md`) implements this spec before the de
   - This spec only tracks staleness. It does not automatically regenerate documents or facts.
 
 - **Constraints**:
-  - All graph writes validate `owner_id` on both endpoints. No edge may connect objects owned by different users.
+  - All graph writes validate `owner_id` on the `dependent` endpoint (`owner_id = caller`). The `dependency` endpoint must also be owned by the caller, except as widened by `specs/sharing/spec.md`'s cross-owner reference rule (ADR-011, PBI-009): a `dependency` owned by a different user is allowed if that row has `shared = true`, in which case the `dependent` row is also marked `shared = true`.
   - D1 remains canonical for graph edges and staleness state.
   - Graph edges do not replace project scoping; `project_id` remains on project-scoped entities for fast filtering and ownership semantics.
   - Graph edges do not replace `document_chunks.document_id`; chunks remain structurally owned by a document and are regenerated with that document.
@@ -98,7 +98,7 @@ Completion evidence: PBI-005 implementation added the `dependency_edges` Drizzle
 
 - Existing memory-model tool and REST request shapes remain source-compatible where explicitly noted, even though storage moves to `dependency_edges`.
 - `facts.status`, `facts.citations`, `project_id`, and `document_chunks.document_id` are not removed by this spec.
-- The graph must never become a cross-user side channel; every edge endpoint is owner-validated before write and before read.
+- The graph must never become a cross-user side channel; every edge endpoint is owner-validated before write and before read, except as widened by `specs/sharing/spec.md`'s cross-owner reference rule: a `dependency` endpoint owned by a different user is only ever reachable if it is `shared = true`.
 - Vectorize remains derived and rebuildable; graph edges do not alter vector IDs or embedding behavior.
 
 ### Scenarios

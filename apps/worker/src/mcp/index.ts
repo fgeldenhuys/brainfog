@@ -23,6 +23,7 @@ import {
   recordTimeSeriesPoint,
   remember,
   setSelfPerson,
+  setShared,
   updateDocument,
   updateFact,
   updateTask,
@@ -395,6 +396,16 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "List stale dependency graph edges.",
       { kind: z.string().optional(), project_id: z.string().optional() },
       (args) => listStale(this.memoryCtx(), args),
+    );
+    register(
+      "set_shared",
+      "Mark an owned entity as shared with other authenticated users, cascading the shared flag to its contents and dependencies.",
+      {
+        entity_kind: z.string(),
+        entity_id: z.string(),
+        shared: z.boolean(),
+      },
+      (args) => setShared(this.memoryCtx(), args as Parameters<typeof setShared>[1]),
     );
   }
 

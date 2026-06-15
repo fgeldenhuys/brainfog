@@ -42,9 +42,13 @@ export const projects = sqliteTable(
     source: text("source").notNull(),
     name: text("name").notNull(),
     description: text("description"),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
-  (table) => [index("projects_owner_name_idx").on(table.ownerId, table.name)],
+  (table) => [
+    index("projects_owner_name_idx").on(table.ownerId, table.name),
+    index("projects_shared_idx").on(table.shared),
+  ],
 );
 
 export const people = sqliteTable(
@@ -82,6 +86,7 @@ export const tasks = sqliteTable(
     priority: real("priority").notNull().default(0.5),
     dueAt: integer("due_at", { mode: "timestamp" }),
     recurrence: text("recurrence", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
   (table) => [
@@ -90,6 +95,7 @@ export const tasks = sqliteTable(
     index("tasks_owner_status_idx").on(table.ownerId, table.status),
     index("tasks_owner_project_idx").on(table.ownerId, table.projectId),
     index("tasks_owner_priority_idx").on(table.ownerId, table.priority),
+    index("tasks_shared_idx").on(table.shared),
   ],
 );
 
@@ -110,6 +116,7 @@ export const facts = sqliteTable(
       .$type<{ topics?: string[] }>()
       .notNull()
       .default(sql`'{}'`),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
   (table) => [
@@ -117,6 +124,7 @@ export const facts = sqliteTable(
     check("facts_status_check", sql`${table.status} in ('current','superseded','proven_wrong')`),
     index("facts_owner_project_idx").on(table.ownerId, table.projectId),
     index("facts_owner_status_idx").on(table.ownerId, table.status),
+    index("facts_shared_idx").on(table.shared),
   ],
 );
 
@@ -133,9 +141,13 @@ export const documents = sqliteTable(
     r2Key: text("r2_key").notNull(),
     mimeType: text("mime_type").notNull().default("text/markdown"),
     sizeBytes: integer("size_bytes"),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
-  (table) => [index("documents_owner_project_idx").on(table.ownerId, table.projectId)],
+  (table) => [
+    index("documents_owner_project_idx").on(table.ownerId, table.projectId),
+    index("documents_shared_idx").on(table.shared),
+  ],
 );
 
 export const documentChunks = sqliteTable(
@@ -169,6 +181,7 @@ export const thoughts = sqliteTable(
       .$type<{ topics?: string[]; dates_mentioned?: string[] }>()
       .notNull()
       .default(sql`'{}'`),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
   (table) => [
@@ -178,6 +191,7 @@ export const thoughts = sqliteTable(
     ),
     index("thoughts_owner_created_idx").on(table.ownerId, table.createdAt),
     index("thoughts_owner_project_idx").on(table.ownerId, table.projectId),
+    index("thoughts_shared_idx").on(table.shared),
   ],
 );
 
@@ -198,6 +212,7 @@ export const timeSeriesPoints = sqliteTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default(sql`'{}'`),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
   (table) => [
@@ -211,6 +226,7 @@ export const timeSeriesPoints = sqliteTable(
       table.projectId,
       table.observedAt,
     ),
+    index("time_series_shared_idx").on(table.shared),
   ],
 );
 
