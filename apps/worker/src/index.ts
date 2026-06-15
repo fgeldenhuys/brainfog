@@ -1,7 +1,10 @@
+import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
+import { lookupAuthenticatedUser, recordTokenUsage } from "./auth-lookup";
 import type { Env } from "./env";
 import { BrainfogMCP } from "./mcp";
-import { type AuthVariables, authMiddleware } from "./middleware/auth";
+import type { AuthVariables } from "./middleware/auth";
+import { handleAuthorizeGet, handleAuthorizePost } from "./oauth";
 import { apiRoutes } from "./routes/api";
 import { uiApiRoutes } from "./routes/ui-api";
 import { uiRoutes } from "./ui";
@@ -11,20 +14,54 @@ const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 app.route("/api/v1", apiRoutes);
 app.route("/api/v1/ui", uiApiRoutes);
 
-// MCP scaffold (ADR-003), behind the same bearer-token middleware as
-// /api/v1 (ARCHITECTURE.md invariant 6). Auth middleware is registered
-// before the mount so it runs first for every /mcp request.
-app.use("/mcp", authMiddleware);
-app.use("/mcp/*", authMiddleware);
-const mcpHandler = BrainfogMCP.serve("/mcp").fetch;
-const mcpExecutionCtx = (c: { executionCtx: unknown; get: (key: "user") => unknown }) =>
-  Object.assign(c.executionCtx as object, {
-    props: { user: c.get("user") },
-  }) as ExecutionContext<unknown>;
-app.all("/mcp", (c) => mcpHandler(c.req.raw, c.env, mcpExecutionCtx(c)));
-app.all("/mcp/*", (c) => mcpHandler(c.req.raw, c.env, mcpExecutionCtx(c)));
+// OAuth endpoints (ADR-012) for claude.ai Custom Connectors
+// GET /authorize renders the authorization form
+app.get("/authorize", (c) => handleAuthorizeGet(c));
+// POST /authorize exchanges a bearer token for an authorization code
+app.post("/authorize", (c) => handleAuthorizePost(c));
+
+// RFC 8414 OAuth authorization server metadata and RFC 9728 protected resource metadata
+// are served automatically by OAuthProvider below
 
 app.route("/", uiRoutes);
 
-export default app;
+// MCP handler for OAuthProvider's apiHandler
+const mcpHandler = BrainfogMCP.serve("/mcp").fetch;
+
+// Export OAuthProvider as the default Worker handler, wrapping the Hono app
+export default new OAuthProvider({
+  apiRoute: "/mcp",
+  apiHandler: {
+    fetch: async (request, env, ctx) => {
+      return mcpHandler(request, env, ctx);
+    },
+  },
+  defaultHandler: app,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  accessTokenTTL: 3600, // 1 hour
+  refreshTokenTTL: 90 * 24 * 3600, // 90 days
+  resolveExternalToken: async ({ token, env }) => {
+    // Resolve static bearer tokens (ADR-004) to the same user identity
+    // so they continue to work on /mcp without OAuth
+    const user = await lookupAuthenticatedUser(token, env as Env);
+    if (!user) {
+      return null;
+    }
+    await recordTokenUsage(env as Env, user.tokenId);
+    return {
+      props: {
+        user: {
+          id: user.id,
+          name: user.name,
+          selfPersonId: user.selfPersonId,
+          slug: user.slug,
+          isAdmin: user.isAdmin,
+        },
+      },
+    };
+  },
+});
+
 export { BrainfogMCP };

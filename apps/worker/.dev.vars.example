@@ -4,3 +4,7 @@
 
 # Secret used to hash per-user bearer tokens before storing them in D1 (ADR-004).
 BRAINFOG_TOKEN_HASH_SECRET=
+
+# OAuth 2.1 grant and token storage uses the OAUTH_KV KV namespace binding
+# configured in wrangler.jsonc (ADR-012). No .dev.vars entry is needed;
+# the binding is automatically available in both local and production environments.

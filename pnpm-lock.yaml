@@ -23,6 +23,9 @@ importers:
       '@brainfog/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@cloudflare/workers-oauth-provider':
+        specifier: ^0.8.0
+        version: 0.8.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
@@ -352,6 +355,9 @@ packages:
     engines: {node: '>=16'}
     cpu: [x64]
     os: [win32]
+
+  '@cloudflare/workers-oauth-provider@0.8.0':
+    resolution: {integrity: sha512-Vb2mjT9R+rLS9FcHgd5+ab4u7SP0ZB7x7t9M94JNMdN5e2ogRf3NOUCPW6NhBCTPwKu36VrfrYPPNGjOek4VYQ==}
 
   '@cloudflare/workers-types@4.20260612.1':
     resolution: {integrity: sha512-PMQI7XP/wrMhxyjseUHoHj6XFqkHaf4utWQ/hhefVY8oMK2LJ730oeQ7H/nZSVMexZe39DzsdOx7sf1PqMr7+Q==}
@@ -3056,6 +3062,8 @@ snapshots:
 
   '@cloudflare/workerd-windows-64@1.20260611.1':
     optional: true
+
+  '@cloudflare/workers-oauth-provider@0.8.0': {}
 
   '@cloudflare/workers-types@4.20260612.1': {}
 

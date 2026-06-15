@@ -41,6 +41,14 @@
     ]
   },
 
+  "kv_namespaces": [
+    {
+      "binding": "OAUTH_KV",
+      "id": "mcp-oauth-local",
+      "preview_id": "mcp-oauth-preview"
+    }
+  ],
+
   "migrations": [
     {
       "tag": "v1",

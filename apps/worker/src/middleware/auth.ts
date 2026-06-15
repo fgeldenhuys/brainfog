@@ -1,7 +1,6 @@
-import { createDb, tokens, users } from "@brainfog/db";
-import { type AuthenticatedUser, hashToken } from "@brainfog/shared";
-import { eq } from "drizzle-orm";
+import type { AuthenticatedUser } from "@brainfog/shared";
 import type { MiddlewareHandler } from "hono";
+import { lookupAuthenticatedUser, recordTokenUsage } from "../auth-lookup";
 import type { Env } from "../env";
 
 export type AuthVariables = {
@@ -24,41 +23,19 @@ export const authMiddleware: MiddlewareHandler<{
     return c.json({ error: "unauthorized" }, 401);
   }
 
-  const tokenHash = await hashToken(token, c.env.BRAINFOG_TOKEN_HASH_SECRET);
-  const db = createDb(c.env.DB);
-  const rows = await db
-    .select({
-      tokenId: tokens.id,
-      userId: users.id,
-      name: users.name,
-      slug: users.slug,
-      isAdmin: users.isAdmin,
-      selfPersonId: users.selfPersonId,
-    })
-    .from(tokens)
-    .innerJoin(users, eq(tokens.userId, users.id))
-    .where(eq(tokens.tokenHash, tokenHash))
-    .limit(1);
-
-  const row = rows[0];
-  if (!row) {
+  const user = await lookupAuthenticatedUser(token, c.env);
+  if (!user) {
     return c.json({ error: "unauthorized" }, 401);
   }
 
-  c.executionCtx.waitUntil(
-    db
-      .update(tokens)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(tokens.id, row.tokenId))
-      .then(() => undefined),
-  );
+  c.executionCtx.waitUntil(recordTokenUsage(c.env, user.tokenId));
 
   c.set("user", {
-    id: row.userId,
-    name: row.name,
-    slug: row.slug,
-    isAdmin: row.isAdmin,
-    selfPersonId: row.selfPersonId,
+    id: user.id,
+    name: user.name,
+    slug: user.slug,
+    isAdmin: user.isAdmin,
+    selfPersonId: user.selfPersonId,
   });
   await next();
 };

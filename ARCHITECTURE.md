@@ -5,45 +5,47 @@ System-wide constraints for brainfog. Anything in this file is binding across al
 ## System Shape
 
 ```text
-                    +-------------------------+
-Claude / OpenCode -->| Remote MCP client       |
-(Streamable HTTP)   +-------------------------+
-                                |
-                                | Bearer token
-                                v
-                    +-------------------------------------+
-                    | Cloudflare Worker (Hono)             |
-                    |  - /mcp   MCP server (McpAgent)      |
-                    |  - /api/v1/*  REST routes            |
-                    |  - /  minimal web UI (server-rendered)|
-                    +--+-----------+-----------+-----------+
-                       |           |           |
-                       v           v           v
-                  +---------+ +----------+ +-----------+
-                  |   D1    | |Vectorize | | Workers AI|
-                  | memory  |<-| index    |<-| embeddings|
-                  | tables, | |(derived,  | |           |
-                  | users,  | | rebuild-  | +-----------+
-                  | tokens  | | able)     |
-                  +----+----+ +-----------+
-                       |
-                       v
-                  +---------+
-                  |   R2    |
-                  |document |
-                  |content  |
-                  |(ADR-008)|
-                  +---------+
+Claude / OpenCode                          claude.ai
+(static Bearer, ADR-004)                   (OAuth 2.1, ADR-012)
+         |                                          |
+         +--------------------+---------------------+
+                               |
+                               v
+        +------------------------------------------------------+
+        | Cloudflare Worker (Hono)                               |
+        |  - /mcp        MCP server (McpAgent)                   |
+        |  - /authorize, /token, /.well-known/*                  |
+        |    OAuth 2.1 authorization server (ADR-012)            |
+        |  - /api/v1/*   REST routes                             |
+        |  - /  minimal web UI (server-rendered)                 |
+        +--+-----------+-----------+-----------+-----------+----+
+           |           |           |           |
+           v           v           v           v
+      +---------+ +----------+ +-----------+ +---------+
+      |   D1    | |Vectorize | | Workers AI| |   KV    |
+      | memory  |<-| index    |<-| embeddings| | OAuth   |
+      | tables, | |(derived,  | |           | | grants/ |
+      | users,  | | rebuild-  | +-----------+ | tokens  |
+      | tokens  | | able)     |               +---------+
+      +----+----+ +-----------+
+           |
+           v
+      +---------+
+      |   R2    |
+      |document |
+      |content  |
+      |(ADR-008)|
+      +---------+
 ```
 
 ## Invariants
 
-1. **Cloudflare is the sole deployment surface.** Workers host the MCP server, REST API, and web UI. D1, Vectorize, and Workers AI are the data/AI primitives. No other hosting provider or database is introduced without a superseding ADR.
+1. **Cloudflare is the sole deployment surface.** Workers host the MCP server, REST API, and web UI. D1, Vectorize, Workers AI, KV, and R2 are the data/AI/storage primitives. No other hosting provider or database is introduced without a superseding ADR.
 2. **D1 is the canonical store for structured data.** Memory tables (`thoughts`, `people`, `tasks`, `facts`, `documents`, `document_chunks`, `projects`, `time_series_points`, and their junction/derivation tables — `specs/memory-model/spec.md`), users, and tokens live in D1. Nothing depends on Vectorize for data that D1 doesn't also hold. The one exception is full document content, which is canonical in R2 (ADR-008); D1 holds a reference (`documents.r2_key`) plus a derived, re-chunkable copy for recall.
 3. **Vectorize is a derived, rebuildable index.** It stores embedding vectors for `thoughts`, `facts`, and `document_chunks` rows, keyed by the D1 row ID itself, with `kind` carried in vector metadata (`specs/memory-model/spec.md`). It can be dropped and rebuilt from D1 at any time. Semantic search degrades gracefully (falling back to D1 keyword/tag lookup) if Vectorize is unavailable or out of sync.
 4. **Every memory has provenance.** Each stored memory records its source (which agent/tool and which user/token wrote it), the project/scope it belongs to, and created/updated timestamps. Writes without provenance are rejected. ADR-011 (`specs/sharing/spec.md`) adds an explicit per-row `shared` flag that widens *read* visibility to other authenticated users without changing a row's `owner_id`, provenance, or write/delete ownership.
 5. **MCP is the primary agent interface.** Claude and OpenCode read and write memories through MCP tools exposed at `/mcp` (Streamable HTTP). The REST API under `/api/v1/` backs the web UI and serves the same service layer as MCP — neither path bypasses the other's invariants.
-6. **Auth is per-user bearer tokens.** Every request to `/mcp` and `/api/v1/*` (and the web UI) must carry a valid bearer token tied to a user record in D1. There is no public signup and no anonymous access.
+6. **Auth is per-user tokens, issued via two paths.** Every request to `/mcp` and `/api/v1/*` (and the web UI) must authenticate as a user in D1. Credentials are either: (a) a static bearer token (ADR-004), validated against the `tokens` table and hashed for storage, or (b) an OAuth 2.1 access token (ADR-012), issued by the OAuth server and validated via KV, which resolves to the same user identity. There is no public signup and no anonymous access; both paths require a pre-existing D1 user.
 7. **One hosted environment.** Brainfog has no separate hosted dev/staging/preview Cloudflare environment in the early stages. Local development uses Wrangler/Miniflare to emulate Workers, D1, Vectorize, Workers AI, and Durable Objects. Any configured Cloudflare resource is treated as the single production target until an ADR introduces environment separation.
 8. **Worker API contracts are additive within a version.** REST routes live under `/api/v1/`; fields may be added but not removed or renamed without a new version once clients depend on them.
 9. **Secrets never live in committed files.** Local secrets live in ignored `.dev.vars`; production secrets are Wrangler-managed. `.dev.vars.example` documents required variable names without real values.
