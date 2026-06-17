@@ -68,6 +68,17 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
   - `limit` is required or defaults to `25`; the service enforces a hard maximum of `100` rows per dataset.
   - All query execution uses the same owner-scoped service layer as MCP and REST. A page definition cannot read another user's rows, even if its stored JSON names another user's IDs.
 
+- **Display Transforms and Formulas**:
+  - Each dataset may include a `display` object with `formulas`: a mapping of formula names to numeric expressions.
+  - Formula names must match `[a-z][a-z0-9_]*` and must not overwrite canonical row fields (`id`, `owner_id`, `created_at`, etc.).
+  - Formulas may reference only numeric fields already present on each row's result or prepared view-model object (e.g., from existing transforms).
+  - Formula expressions support numeric literals, variables, operators (`+`, `-`, `*`, `/`, `%`, parentheses), and allowlisted functions: `round`, `roundTo`, `floor`, `ceil`, `abs`, `min`, `max`.
+  - Disallowed in formulas: member access, arrays, strings, comparisons, logical operators, conditionals, loops, assignment, custom functions, and arbitrary JavaScript.
+  - Formula results must be finite numbers; `NaN`, `Infinity`, divide-by-zero, and other non-finite outputs are validation errors.
+  - Formulas are validated during page create/update/preview; unsafe or malformed formulas reject the operation with validation errors.
+  - Formula expressions are limited to 256 characters each; datasets are limited to 10 formulas maximum.
+  - Formula evaluation is deterministic, side-effect-free, and happens server-side before Mustache rendering, making results available as additional escaped fields in each row's view model.
+
 - **Pre-Authenticated Page URLs**:
   - Generated URLs have the shape `/:user_slug/:page_slug?access=<opaque_secret>`.
   - The opaque secret is generated with the same cryptographic standard as bearer tokens, shown only once, and stored only as a hash derived with `BRAINFOG_TOKEN_HASH_SECRET` or a successor secret if a future ADR introduces one.
@@ -104,10 +115,13 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
 - [x] Dynamic pages can also render through a valid pre-authenticated URL for that exact page; the URL secret is exchanged for a page-scoped HTTP-only cookie and removed from the visible URL via redirect.
 - [x] The template renderer validates the allowed tag/attribute subset, escapes all data interpolation, rejects disallowed constructs, and fails closed with validation errors.
 - [x] Dynamic page queries accept only validated JSON definitions, never SQL, and enforce owner scope plus per-dataset row limits.
-- [x] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for page validation, unsafe template rejection, owner-scoped dynamic rendering, access-link expiry/use/revocation, and pre-auth scope boundaries.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for page validation, unsafe template rejection, owner-scoped dynamic rendering, access-link expiry/use/revocation, pre-auth scope boundaries, and formula validation/evaluation.
 - [x] `pnpm test:e2e` covers creating or seeding a page, rendering a published dynamic page under `/:user_slug/:page_slug`, and using a pre-authenticated page URL.
+- [x] Formula tests cover valid arithmetic expressions, allowlisted functions (`roundTo`, `floor`, `ceil`, `abs`, `min`, `max`), invalid formulas (member access, strings, conditionals, unsupported functions), unknown variables, non-finite results, protected field overwriting, and no cross-row/cross-user data access.
 
 Completion evidence: PBI-007 implementation added `pages` and `page_access_links` schema/migration, a shared page service, Mustache plus parse5 fail-closed template validation/rendering, strict page-owner query execution with server-side display view-model shaping, MCP page/access-link tools, REST page/access-link routes under `/api/v1/ui`, default UI page management, dynamic routes under `/:user_slug/` and `/:user_slug/:page_slug`, and narrow pre-authenticated page links using hashed one-time secrets and page-scoped HTTP-only cookies. Verification on 2026-06-17: `pnpm check && pnpm typecheck && pnpm test` passed with 145 Vitest tests; `pnpm test:e2e` passed with 3 Playwright tests. Critic review initially found blocking issues around invalid draft persistence, pre-auth enumeration by status, a hardcoded MCP access-link origin, and missing MCP/access-link boundary tests; a focused fix pass resolved all four, and final critic confirmation reported no blocking issues.
+
+PBI-013 (display formulas) extends this with: a formula evaluator module (`apps/worker/src/formula.ts`) using `expr-eval` (declared in `@brainfog/worker`) with strict syntax validation (patterns: member access, strings, comparisons, conditionals, assignment, and `==`/`!=` forbidden; only numeric operators and allowlisted functions allowed); formula validation at page create/update/preview time rejecting unsafe expressions, too-long expressions (>256 chars), too-many formulas (>10 per dataset), protected field overwrites, and non-finite results; formula evaluation server-side after owner-scoped queries and before Mustache rendering; formula results available as additional escaped fields in row view models. Verification on 2026-06-17: `pnpm check && pnpm typecheck && pnpm test` passed with 196 Vitest tests (43 formula unit tests, integration tests, plus all existing page tests). Formula tests cover simple arithmetic, function calls (`round` 1-arg, `roundTo` 2-arg, `floor`, `ceil`, `abs`, `min`, `max`), complex multi-variable expressions, invalid syntax including `==`/`!=` operators, length/count limits, name validation, protected field overwriting, and no cross-row evaluation. Integration tests confirm formulas are validated on page creation and can be previewed without publishing. No regressions in existing page functionality.
 
 ### Regression Guardrails
 

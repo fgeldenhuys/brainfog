@@ -17,6 +17,7 @@ import { and, desc, eq, gt, gte, isNull, like, lte, type SQL } from "drizzle-orm
 import Mustache from "mustache";
 import { type DefaultTreeAdapterMap, parseFragment } from "parse5";
 import type { Env } from "./env";
+import { applyFormulas, validateFormulas } from "./formula";
 import { createId, MemoryError, type MemoryUser, validateSlug } from "./memory";
 
 export type PageCtx = { env: Env; user: MemoryUser; source?: string };
@@ -31,6 +32,10 @@ type QueryKind =
   | "document_chunks"
   | "time_series_points"
   | "recall";
+type PageQueryDisplay = {
+  formulas?: Record<string, string>;
+};
+
 type PageQuery = {
   name: string;
   kind: QueryKind;
@@ -38,6 +43,7 @@ type PageQuery = {
   limit: number;
   sort?: string;
   transforms: string[];
+  display?: PageQueryDisplay;
 };
 
 const allowedKinds = new Set<QueryKind>([
@@ -157,6 +163,24 @@ function normalizeQueries(input: unknown): PageQuery[] {
       if (!allowedTransforms.has(transform))
         throw new MemoryError(400, `unsupported transform: ${transform}`);
     }
+    const display =
+      v.display && typeof v.display === "object"
+        ? (v.display as Record<string, unknown>)
+        : undefined;
+    const formulas =
+      display?.formulas && typeof display.formulas === "object"
+        ? (display.formulas as Record<string, string>)
+        : undefined;
+
+    // Validate formulas if present
+    if (formulas) {
+      const formulaErrors = validateFormulas(formulas);
+      if (formulaErrors.length > 0) {
+        const errorMsg = formulaErrors.map((e) => `${e.field}: ${e.message}`).join("; ");
+        throw new MemoryError(400, `invalid formulas for ${name}: ${errorMsg}`);
+      }
+    }
+
     return {
       name,
       kind,
@@ -164,6 +188,7 @@ function normalizeQueries(input: unknown): PageQuery[] {
       limit,
       sort: typeof v.sort === "string" ? v.sort : undefined,
       transforms,
+      display: formulas ? { formulas } : undefined,
     };
   });
 }
@@ -235,7 +260,12 @@ function dateFilter(column: Parameters<typeof gte>[0], filters: Record<string, u
   return out;
 }
 
-function mapRows(kind: QueryKind, rows: Record<string, unknown>[], transforms: string[]) {
+function mapRows(
+  kind: QueryKind,
+  rows: Record<string, unknown>[],
+  transforms: string[],
+  formulas?: Record<string, string>,
+) {
   const withRows = rows.map((r) => {
     const out: Record<string, unknown> = { ...r };
     const createdAt = r.createdAt ?? r.created_at;
@@ -258,6 +288,9 @@ function mapRows(kind: QueryKind, rows: Record<string, unknown>[], transforms: s
           ? `/app/documents/${r.id}`
           : `/app/browser/${kind.replaceAll("_", "-")}/${r.id}`;
       out.url = path;
+    }
+    if (formulas) {
+      Object.assign(out, applyFormulas(formulas, out));
     }
     return out;
   });
@@ -401,7 +434,7 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
           .limit(q.limit);
     }
   })();
-  return mapRows(q.kind, rows as Record<string, unknown>[], q.transforms);
+  return mapRows(q.kind, rows as Record<string, unknown>[], q.transforms, q.display?.formulas);
 }
 
 export async function buildPageViewModel(

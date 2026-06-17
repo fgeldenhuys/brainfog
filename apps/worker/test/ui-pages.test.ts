@@ -4,7 +4,7 @@ import { hashToken } from "@brainfog/shared";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { addDocument, createProject, remember } from "../src/memory";
-import { createPage, createPageAccessLink, revokePageAccessLink } from "../src/pages";
+import { createPage, createPageAccessLink, previewPage, revokePageAccessLink } from "../src/pages";
 
 const ADMIN_TOKEN = "ui-pages-admin-token";
 const USER_TOKEN = "ui-pages-user-token";
@@ -371,5 +371,141 @@ describe("authenticated UI pages", () => {
       });
       expect(response.status).not.toBe(404);
     }
+  });
+
+  it("evaluates page display formulas and renders them as Mustache fields", async () => {
+    const adminCtx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:formula",
+    };
+
+    // Create a page with formulas defined in display options
+    const page = await createPage(adminCtx, {
+      title: "Metrics Dashboard",
+      slug: `formula-page-${Date.now().toString(36)}`,
+      status: "published",
+      template: `
+        <section>
+          <h1>{{page.title}}</h1>
+          {{#tasks}}
+          <div>
+            <p>{{title}} - Completion: {{completion_percent}}%</p>
+          </div>
+          {{/tasks}}
+        </section>
+      `,
+      queries: {
+        tasks: {
+          kind: "tasks",
+          filters: {},
+          limit: 10,
+          display: {
+            formulas: {
+              completion_percent: "roundTo((completed_count / total_count) * 100, 1)",
+            },
+          },
+        },
+      },
+    });
+
+    expect(page.id).toBeTruthy();
+    expect(page.slug).toBeTruthy();
+
+    // Verify the page was created with formulas in the queries
+    const queries = page.queries as Record<
+      string,
+      { display?: { formulas?: Record<string, string> } }
+    >;
+    expect(queries.tasks?.display?.formulas?.completion_percent).toBe(
+      "roundTo((completed_count / total_count) * 100, 1)",
+    );
+
+    // Test formula evaluation through the page preview
+    const adminCtxForPreview = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:formula",
+    };
+    const preview = await previewPage(adminCtxForPreview, {
+      id: page.id,
+    });
+    expect(preview.html).toContain("Metrics Dashboard");
+  });
+
+  it("rejects pages with invalid formula expressions", async () => {
+    const adminCtx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:formula",
+    };
+
+    // Try to create page with member access in formula
+    await expect(
+      createPage(adminCtx, {
+        title: "Bad Formula",
+        slug: `bad-formula-${Date.now().toString(36)}`,
+        status: "published",
+        template: "<p>{{value}}</p>",
+        queries: {
+          data: {
+            kind: "thoughts",
+            filters: {},
+            limit: 10,
+            display: {
+              formulas: {
+                bad: "obj.property",
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(/member access/);
+
+    // Try to create page with string literal in formula
+    await expect(
+      createPage(adminCtx, {
+        title: "Bad Formula 2",
+        slug: `bad-formula-2-${Date.now().toString(36)}`,
+        status: "published",
+        template: "<p>{{value}}</p>",
+        queries: {
+          data: {
+            kind: "thoughts",
+            filters: {},
+            limit: 10,
+            display: {
+              formulas: {
+                bad: '"string"',
+              },
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(/string/);
+
+    // Try to create page with too many formulas
+    const tooManyFormulas: Record<string, string> = {};
+    for (let i = 0; i < 15; i++) {
+      tooManyFormulas[`formula_${i}`] = "1 + 1";
+    }
+    await expect(
+      createPage(adminCtx, {
+        title: "Too Many Formulas",
+        slug: `too-many-formulas-${Date.now().toString(36)}`,
+        status: "published",
+        template: "<p>{{value}}</p>",
+        queries: {
+          data: {
+            kind: "thoughts",
+            filters: {},
+            limit: 10,
+            display: {
+              formulas: tooManyFormulas,
+            },
+          },
+        },
+      }),
+    ).rejects.toThrow(/maximum/);
   });
 });
