@@ -146,6 +146,11 @@ export const Layout: FC<{
       <body hx-boost="true">
         <header>
           <h1>
+            <img
+              src="/thinker.png"
+              alt=""
+              style="height: 1.5rem; width: 1.5rem; vertical-align: middle; margin-right: 0.5rem;"
+            />
             <a href="/app">brainfog</a>
           </h1>
           {props.user ? (

@@ -63,9 +63,10 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
 - **Dynamic Page Queries**:
   - `queries` is JSON, validated by the service layer, with named datasets. It never accepts SQL.
   - Allowed `kind` values: `thoughts`, `facts`, `tasks`, `people`, `projects`, `documents`, `document_chunks`, `time_series_points`, and `recall`.
+  - Allowed transforms: `date_labels`, `status_labels`, `excerpts`, `app_links`, `count`, and `pivot_by_date`. The `pivot_by_date` transform is only meaningful for `time_series_points` queries and is silently ignored for other kinds. When applied it groups rows by `observedAt` calendar date (YYYY-MM-DD bucket) into one row per date; numeric series values are exposed as fields named by the suffix after the first dot in `seriesKey` (e.g. `electricity.cost_per_unit` → field `cost_per_unit`); `metadata.notes` is merged across the group (first non-empty wins). When `pivot_by_date` is active the pre-pivot DB query fetches up to `limit × 20` raw rows (hard cap 500) and `limit` is applied to the post-pivot row count.
   - Allowed filters are explicit per kind: `project_id`, `status`, `type`, `series_key`, `subject_type`, `subject_id`, `from`, `to`, `q`, and simple text search where the existing service layer supports it.
   - Allowed sort fields are explicit per kind and default to newest-first where timestamps exist.
-  - `limit` is required or defaults to `25`; the service enforces a hard maximum of `100` rows per dataset.
+  - `limit` is required or defaults to `25`; the service enforces a hard maximum of `500` rows per dataset (raised from 100 in PBI-014 to support pivot use cases).
   - All query execution uses the same owner-scoped service layer as MCP and REST. A page definition cannot read another user's rows, even if its stored JSON names another user's IDs.
 
 - **Display Transforms and Formulas**:

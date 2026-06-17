@@ -62,6 +62,7 @@ const allowedFilters = new Set([
   "status",
   "type",
   "series_key",
+  "series_prefix",
   "subject_type",
   "subject_id",
   "from",
@@ -75,6 +76,7 @@ const allowedTransforms = new Set([
   "excerpts",
   "app_links",
   "count",
+  "pivot_by_date",
 ]);
 const allowedTags = new Set([
   "section",
@@ -133,7 +135,19 @@ function iso(value: unknown) {
   return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
 }
 
+function parseQueriesInput(input: unknown): unknown {
+  if (typeof input === "string") {
+    try {
+      return JSON.parse(input);
+    } catch {
+      throw new MemoryError(400, "queries must be a valid JSON object or array");
+    }
+  }
+  return input;
+}
+
 function normalizeQueries(input: unknown): PageQuery[] {
+  input = parseQueriesInput(input);
   const raw = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   const entries = Array.isArray(input)
     ? input.map((v, i) => [String((v as { name?: unknown })?.name ?? `dataset_${i + 1}`), v])
@@ -153,7 +167,7 @@ function normalizeQueries(input: unknown): PageQuery[] {
     for (const key of Object.keys(filters)) {
       if (!allowedFilters.has(key)) throw new MemoryError(400, `unsupported filter: ${key}`);
     }
-    const limit = Math.min(100, Math.max(1, Number(v.limit ?? 25) || 25));
+    const limit = Math.min(500, Math.max(1, Number(v.limit ?? 25) || 25));
     const transforms = Array.isArray(v.transforms)
       ? v.transforms.map(String)
       : typeof v.transforms === "string"
@@ -260,13 +274,43 @@ function dateFilter(column: Parameters<typeof gte>[0], filters: Record<string, u
   return out;
 }
 
+function pivotByDate(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const groups = new Map<string, Record<string, unknown>>();
+  for (const row of rows) {
+    const dt = row.observedAt;
+    const dateKey =
+      dt instanceof Date
+        ? dt.toISOString().slice(0, 10)
+        : typeof dt === "string"
+          ? dt.slice(0, 10)
+          : "";
+    if (!dateKey) continue;
+    if (!groups.has(dateKey)) {
+      groups.set(dateKey, { observedAt: dt, observed_at_label: dateKey });
+    }
+    const group = groups.get(dateKey) ?? {};
+    const seriesKey = String(row.seriesKey ?? "");
+    const dotIdx = seriesKey.indexOf(".");
+    const suffix = dotIdx >= 0 ? seriesKey.slice(dotIdx + 1) : seriesKey;
+    if (typeof row.value === "number" && Number.isFinite(row.value)) group[suffix] = row.value;
+    const meta = row.metadata as Record<string, unknown> | undefined;
+    if (meta?.notes && !group.notes) group.notes = String(meta.notes);
+  }
+  return Array.from(groups.values());
+}
+
 function mapRows(
   kind: QueryKind,
   rows: Record<string, unknown>[],
   transforms: string[],
   formulas?: Record<string, string>,
+  limit?: number,
 ) {
-  const withRows = rows.map((r) => {
+  const inputRows =
+    transforms.includes("pivot_by_date") && kind === "time_series_points"
+      ? pivotByDate(rows).slice(0, limit)
+      : rows;
+  const withRows = inputRows.map((r) => {
     const out: Record<string, unknown> = { ...r };
     const createdAt = r.createdAt ?? r.created_at;
     const updatedAt = r.updatedAt ?? r.updated_at;
@@ -415,26 +459,41 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
           .orderBy(desc(documentChunks.createdAt))
           .limit(q.limit);
       case "time_series_points":
-        return db
-          .select()
-          .from(timeSeriesPoints)
-          .where(
-            common([
-              eq(timeSeriesPoints.ownerId, owner),
-              typeof f.project_id === "string"
-                ? eq(timeSeriesPoints.projectId, f.project_id)
-                : undefined,
-              typeof f.series_key === "string"
-                ? eq(timeSeriesPoints.seriesKey, f.series_key)
-                : undefined,
-              ...dateFilter(timeSeriesPoints.observedAt, f),
-            ]),
-          )
-          .orderBy(desc(timeSeriesPoints.observedAt))
-          .limit(q.limit);
+        if (typeof f.series_key === "string" && typeof f.series_prefix === "string")
+          throw new MemoryError(400, "series_key and series_prefix are mutually exclusive");
+        return (
+          db
+            .select()
+            .from(timeSeriesPoints)
+            .where(
+              common([
+                eq(timeSeriesPoints.ownerId, owner),
+                typeof f.project_id === "string"
+                  ? eq(timeSeriesPoints.projectId, f.project_id)
+                  : undefined,
+                typeof f.series_key === "string"
+                  ? eq(timeSeriesPoints.seriesKey, f.series_key)
+                  : undefined,
+                typeof f.series_prefix === "string"
+                  ? like(timeSeriesPoints.seriesKey, `${f.series_prefix}.%`)
+                  : undefined,
+                ...dateFilter(timeSeriesPoints.observedAt, f),
+              ]),
+            )
+            .orderBy(desc(timeSeriesPoints.observedAt))
+            // When pivot_by_date is active fetch enough pre-pivot rows (assumes ≤20 series);
+            // mapRows slices to q.limit after pivoting.
+            .limit(q.transforms.includes("pivot_by_date") ? Math.min(q.limit * 20, 500) : q.limit)
+        );
     }
   })();
-  return mapRows(q.kind, rows as Record<string, unknown>[], q.transforms, q.display?.formulas);
+  return mapRows(
+    q.kind,
+    rows as Record<string, unknown>[],
+    q.transforms,
+    q.display?.formulas,
+    q.limit,
+  );
 }
 
 export async function buildPageViewModel(
@@ -504,7 +563,8 @@ export async function createPage(
   const status = input.status ?? "draft";
   if (!["draft", "published", "archived"].includes(status))
     throw new MemoryError(400, "invalid status");
-  validatePageDefinition(input.template, input.queries);
+  const parsedQueries = parseQueriesInput(input.queries);
+  validatePageDefinition(input.template, parsedQueries);
   const row = {
     id: createId("page"),
     ownerId: ctx.user.id,
@@ -514,7 +574,7 @@ export async function createPage(
     description: input.description ?? null,
     status,
     template: input.template,
-    queries: (input.queries && typeof input.queries === "object" ? input.queries : {}) as Record<
+    queries: (parsedQueries && typeof parsedQueries === "object" ? parsedQueries : {}) as Record<
       string,
       unknown
     >,
@@ -537,11 +597,12 @@ export async function updatePage(
   },
 ) {
   const row = await getOwnedPage(ctx, id);
+  const parsedQueries = input.queries !== undefined ? parseQueriesInput(input.queries) : undefined;
   const next = {
     title: input.title ?? row.title,
     slug: input.slug ? validateSlug(input.slug) : row.slug,
     template: input.template ?? row.template,
-    queries: input.queries ?? row.queries,
+    queries: parsedQueries ?? row.queries,
     description: Object.hasOwn(input, "description")
       ? (input.description ?? null)
       : row.description,

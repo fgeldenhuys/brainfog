@@ -1,5 +1,13 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
-import { createDb, pageAccessLinks, pages, thoughts, tokens, users } from "@brainfog/db";
+import {
+  createDb,
+  pageAccessLinks,
+  pages,
+  thoughts,
+  timeSeriesPoints,
+  tokens,
+  users,
+} from "@brainfog/db";
 import { hashToken } from "@brainfog/shared";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -507,5 +515,148 @@ describe("authenticated UI pages", () => {
         },
       }),
     ).rejects.toThrow(/maximum/);
+  });
+});
+
+describe("pivot_by_date transform", () => {
+  const PIVOT_USER = "pivot-test-user";
+  const PIVOT_TOKEN = "pivot-test-token";
+
+  beforeAll(async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    const db = createDb(env.DB);
+    await db.insert(users).values({ id: PIVOT_USER, name: "Pivot", slug: "pivot-test" });
+    await db.insert(tokens).values({
+      id: `${PIVOT_USER}-token`,
+      userId: PIVOT_USER,
+      tokenHash: await hashToken(PIVOT_TOKEN, env.BRAINFOG_TOKEN_HASH_SECRET),
+      label: "test",
+    });
+    // Insert three series for two dates (simulating electricity-style multi-series)
+    await db.insert(timeSeriesPoints).values([
+      {
+        id: "pivot-before-d1",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "elec.before",
+        value: 100,
+        unit: "kWh",
+        observedAt: new Date("2024-02-01"),
+        metadata: { notes: "first note" },
+      },
+      {
+        id: "pivot-after-d1",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "elec.after",
+        value: 250,
+        unit: "kWh",
+        observedAt: new Date("2024-02-01"),
+        metadata: {},
+      },
+      {
+        id: "pivot-spent-d1",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "elec.spent",
+        value: 1500,
+        unit: "ZAR",
+        observedAt: new Date("2024-02-01"),
+        metadata: {},
+      },
+      {
+        id: "pivot-before-d2",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "elec.before",
+        value: 50,
+        unit: "kWh",
+        observedAt: new Date("2024-03-01"),
+        metadata: { notes: "second note" },
+      },
+      {
+        id: "pivot-after-d2",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "elec.after",
+        value: 280,
+        unit: "kWh",
+        observedAt: new Date("2024-03-01"),
+        metadata: {},
+      },
+    ]);
+  });
+
+  it("groups time_series_points by observedAt date and exposes series suffixes as fields", async () => {
+    const ctx = {
+      env,
+      user: { id: PIVOT_USER, name: "Pivot", slug: "pivot-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "<table>{{#data}}<tr><td>{{observed_at_label}}</td><td>{{before}}</td><td>{{after}}</td><td>{{spent}}</td><td>{{notes}}</td></tr>{{/data}}</table>",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "elec" },
+          limit: 10,
+          transforms: ["pivot_by_date"],
+        },
+      },
+    });
+    // Expect two pivot rows (one per date), newest first
+    expect(html).toContain("2024-03-01");
+    expect(html).toContain("2024-02-01");
+    // Field values from pivot
+    expect(html).toContain("<td>50</td>"); // before on 2024-03-01
+    expect(html).toContain("<td>280</td>"); // after on 2024-03-01
+    expect(html).toContain("<td>100</td>"); // before on 2024-02-01
+    expect(html).toContain("<td>1500</td>"); // spent on 2024-02-01
+    // Notes merged from metadata.notes
+    expect(html).toContain("first note");
+    expect(html).toContain("second note");
+  });
+
+  it("applies limit to post-pivot rows, not pre-pivot rows", async () => {
+    const ctx = {
+      env,
+      user: { id: PIVOT_USER, name: "Pivot", slug: "pivot-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<p>{{observed_at_label}}</p>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "elec" },
+          limit: 1, // only the newest pivot row
+          transforms: ["pivot_by_date"],
+        },
+      },
+    });
+    expect(html).toContain("2024-03-01");
+    expect(html).not.toContain("2024-02-01");
+  });
+
+  it("pivot_by_date has no effect on non-time_series_points queries", async () => {
+    const ctx = {
+      env,
+      user: { id: PIVOT_USER, name: "Pivot", slug: "pivot-test" },
+      source: "test",
+    };
+    // Should not throw; transform is silently ignored for thoughts
+    const { html } = await previewPage(ctx, {
+      template: "{{^rows}}<p>empty</p>{{/rows}}",
+      queries: {
+        rows: {
+          kind: "thoughts",
+          filters: {},
+          limit: 5,
+          transforms: ["pivot_by_date"],
+        },
+      },
+    });
+    expect(html).toContain("empty");
   });
 });
