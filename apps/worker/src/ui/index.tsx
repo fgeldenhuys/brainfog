@@ -20,6 +20,21 @@ import {
   revokeToken,
   updateUser,
 } from "../memory";
+import {
+  createPage,
+  createPageAccessLink,
+  deletePage,
+  exchangePageAccess,
+  findPublishedPageByPath,
+  getPage,
+  listPageAccessLinks,
+  listPages,
+  previewPage,
+  renderPage,
+  revokePageAccessLink,
+  updatePage,
+  validatePageAccessCookie,
+} from "../pages";
 import { assetRoutes } from "./assets";
 import { browserRoutes } from "./browser";
 import {
@@ -281,6 +296,65 @@ function param(c: AppContext, name: string) {
   const value = c.req.param(name);
   if (!value) throw new MemoryError(400, `missing ${name}`);
   return value;
+}
+
+function parseQueries(value: string | undefined) {
+  if (!value?.trim()) return {};
+  try {
+    return JSON.parse(value) as Record<string, unknown>;
+  } catch {
+    throw new MemoryError(400, "Queries must be valid JSON.");
+  }
+}
+
+function PageForm(props: {
+  page?: Awaited<ReturnType<typeof getPage>>;
+  action: string;
+  error?: string;
+}) {
+  const page = props.page;
+  return (
+    <form method="post" action={props.action} style={{ maxWidth: "none" }}>
+      {props.error ? <p class="error">{props.error}</p> : null}
+      <label htmlFor="title">Title</label>
+      <input id="title" name="title" value={page?.title ?? ""} required />
+      <label htmlFor="slug">Slug</label>
+      <input id="slug" name="slug" value={page?.slug ?? ""} pattern="[a-z0-9-]+" required />
+      <label htmlFor="description">Description</label>
+      <input id="description" name="description" value={page?.description ?? ""} />
+      <label htmlFor="status">Status</label>
+      <select id="status" name="status">
+        {(["draft", "published", "archived"] as const).map((status) => (
+          <option value={status} selected={(page?.status ?? "draft") === status}>
+            {status}
+          </option>
+        ))}
+      </select>
+      <label htmlFor="template">Template</label>
+      <textarea id="template" name="template" required>
+        {page?.template ??
+          "<section><h1>{{page.title}}</h1>{{#items}}<p>{{content}}</p>{{/items}}</section>"}
+      </textarea>
+      <label htmlFor="queries">Queries JSON</label>
+      <textarea id="queries" name="queries" required>
+        {JSON.stringify(
+          page?.queries ?? {
+            items: { kind: "thoughts", limit: 10, transforms: ["date_labels", "excerpts"] },
+          },
+          null,
+          2,
+        )}
+      </textarea>
+      <div class="button-group">
+        <button type="submit">Save</button>
+        {page ? (
+          <button type="submit" formaction={`/app/pages/${page.id}/preview`}>
+            Preview
+          </button>
+        ) : null}
+      </div>
+    </form>
+  );
 }
 
 type RecallResult = { kind: string; score: number; row: Record<string, unknown> };
@@ -709,6 +783,189 @@ appRoutes.get("/metrics", async (c: AppContext) => {
   );
 });
 
+// GET /app/pages - Basic page management surface
+appRoutes.get("/pages", async (c: AppContext) => {
+  const user = c.get("user");
+  const rows = await listPages(memCtx(c));
+  return c.html(
+    <Layout user={user} currentPath="/app/pages">
+      <h2>User Pages</h2>
+      <div class="button-group">
+        <a href="/app/pages/new">New page</a>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th>
+              <th>Slug</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((page) => (
+              <tr key={page.id}>
+                <td>{page.title}</td>
+                <td>
+                  <code>{page.slug}</code>
+                </td>
+                <td>{page.status}</td>
+                <td>
+                  <a href={`/app/pages/${page.id}`}>edit</a>{" "}
+                  {user.slug && page.status === "published" ? (
+                    <a href={`/${user.slug}/${page.slug}`}>view</a>
+                  ) : null}
+                  <form method="post" action={`/app/pages/${page.id}/delete`} class="inline">
+                    <button type="submit" class="danger">
+                      Delete
+                    </button>
+                  </form>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Layout>,
+  );
+});
+
+appRoutes.get("/pages/new", async (c: AppContext) =>
+  c.html(
+    <Layout user={c.get("user")} currentPath="/app/pages">
+      <h2>New Page</h2>
+      <PageForm action="/app/pages" />
+    </Layout>,
+  ),
+);
+
+appRoutes.post("/pages", async (c: AppContext) => {
+  const form = await formBody(c);
+  const page = await createPage(memCtx(c), {
+    title: form.title ?? "",
+    slug: form.slug ?? "",
+    description: form.description || null,
+    status: form.status as "draft" | "published" | "archived",
+    template: form.template ?? "",
+    queries: parseQueries(form.queries),
+  });
+  return c.redirect(`/app/pages/${page.id}`);
+});
+
+appRoutes.get("/pages/:id", async (c: AppContext) => {
+  const page = await getPage(memCtx(c), param(c, "id"));
+  const links = await listPageAccessLinks(memCtx(c), page.id);
+  return c.html(
+    <Layout user={c.get("user")} currentPath="/app/pages">
+      <h2>Edit Page</h2>
+      {page.validationErrors.length ? (
+        <p class="error">{page.validationErrors.join("; ")}</p>
+      ) : null}
+      <PageForm page={page} action={`/app/pages/${page.id}`} />
+      <div class="card">
+        <h3>Access links</h3>
+        <form method="post" action={`/app/pages/${page.id}/access-links`}>
+          <label>
+            Label
+            <input name="label" />
+          </label>
+          <label>
+            TTL seconds
+            <input name="ttl_seconds" value="86400" />
+          </label>
+          <label>
+            Max uses
+            <input name="max_uses" value="1" />
+          </label>
+          <button type="submit">Create access link</button>
+        </form>
+        <ul>
+          {links.map((link) => (
+            <li key={link.id}>
+              {link.label ?? link.id}: uses {link.useCount}/{link.maxUses ?? "∞"}, expires{" "}
+              {fmtDate(link.expiresAt)} {link.revokedAt ? "revoked" : ""}{" "}
+              <form
+                method="post"
+                action={`/app/page-access-links/${link.id}/revoke`}
+                class="inline"
+              >
+                <button type="submit">Revoke</button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </Layout>,
+  );
+});
+
+appRoutes.post("/pages/:id", async (c: AppContext) => {
+  const form = await formBody(c);
+  const id = param(c, "id");
+  await updatePage(memCtx(c), id, {
+    title: form.title,
+    slug: form.slug,
+    description: form.description || null,
+    status: form.status as "draft" | "published" | "archived",
+    template: form.template,
+    queries: parseQueries(form.queries),
+  });
+  return c.redirect(`/app/pages/${id}`);
+});
+
+appRoutes.post("/pages/:id/preview", async (c: AppContext) => {
+  const form = await formBody(c);
+  const result = await previewPage(memCtx(c), {
+    template: form.template,
+    queries: parseQueries(form.queries),
+  });
+  return c.html(
+    <Layout user={c.get("user")} currentPath="/app/pages">
+      <h2>Page Preview</h2>
+      <div class="content">{raw(result.html)}</div>
+      <p>
+        <a href={`/app/pages/${param(c, "id")}`}>Back to editor</a>
+      </p>
+    </Layout>,
+  );
+});
+
+appRoutes.post("/pages/:id/delete", async (c: AppContext) => {
+  await deletePage(memCtx(c), param(c, "id"));
+  return c.redirect("/app/pages");
+});
+
+appRoutes.post("/pages/:id/access-links", async (c: AppContext) => {
+  const form = await formBody(c);
+  const id = param(c, "id");
+  const link = await createPageAccessLink(
+    memCtx(c),
+    id,
+    {
+      label: form.label || null,
+      ttl_seconds: Number(form.ttl_seconds) || undefined,
+      max_uses: Number(form.max_uses) || 1,
+    },
+    new URL(c.req.url).origin,
+  );
+  return c.html(
+    <Layout user={c.get("user")} currentPath="/app/pages">
+      <h2>Access link created</h2>
+      <p>This plaintext URL is shown once.</p>
+      <pre>{link.url}</pre>
+      <p>
+        <a href={`/app/pages/${id}`}>Back to page</a>
+      </p>
+    </Layout>,
+  );
+});
+
+appRoutes.post("/page-access-links/:id/revoke", async (c: AppContext) => {
+  await revokePageAccessLink(memCtx(c), param(c, "id"));
+  return c.redirect("/app/pages");
+});
+
 // GET /app/users - User management (admin only)
 appRoutes.get("/users", async (c: AppContext) => {
   return usersPage(c);
@@ -822,3 +1079,71 @@ appRoutes.get("/documents/:id/raw", async (c: AppContext) => {
 
 // Mount appRoutes at /app
 uiRoutes.route("/app", appRoutes);
+
+uiRoutes.get("/:user_slug/", async (c) => {
+  const token = getCookie(c, TOKEN_COOKIE);
+  const signedIn = token ? await findUserByToken(c.env, token) : undefined;
+  const userSlug = c.req.param("user_slug");
+  if (!signedIn || signedIn.slug !== userSlug) return c.text("Not found", 404);
+  const rows = await listPages(
+    { env: c.env, user: signedIn, source: "ui:dynamic-page" },
+    { status: "published" },
+  );
+  c.header("Cache-Control", "no-store");
+  return c.html(
+    <Layout user={signedIn} currentPath={`/${userSlug}/`}>
+      <h2>{signedIn.name}'s pages</h2>
+      <ul>
+        {rows.map((page) => (
+          <li key={page.id}>
+            <a href={`/${userSlug}/${page.slug}`}>{page.title}</a>
+          </li>
+        ))}
+      </ul>
+    </Layout>,
+  );
+});
+
+uiRoutes.get("/:user_slug/:page_slug", async (c) => {
+  const userSlug = c.req.param("user_slug");
+  const pageSlug = c.req.param("page_slug");
+  const found = await findPublishedPageByPath(c.env, userSlug, pageSlug);
+  if (!found) return c.text("Not found", 404);
+
+  const url = new URL(c.req.url);
+  const access = url.searchParams.get("access");
+  const cookieName = `bf_page_${found.page.id}`;
+  const token = getCookie(c, TOKEN_COOKIE);
+  const signedIn = token ? await findUserByToken(c.env, token) : undefined;
+  if (access) {
+    const exchanged = await exchangePageAccess(c.env, found.page.id, access);
+    if (!exchanged && signedIn?.id !== found.user.id) return c.text("Not found", 404);
+    if (!exchanged) return c.redirect(`/${userSlug}/${pageSlug}`);
+    setCookie(c, cookieName, access, {
+      httpOnly: true,
+      sameSite: "Strict",
+      path: `/${userSlug}/${pageSlug}`,
+      expires: exchanged.expiresAt,
+    });
+    return c.redirect(`/${userSlug}/${pageSlug}`);
+  }
+
+  const pageCookie = getCookie(c, cookieName);
+  const allowed =
+    signedIn?.id === found.user.id ||
+    (pageCookie ? await validatePageAccessCookie(c.env, found.page.id, pageCookie) : false);
+  if (!allowed) return c.text("Not found", 404);
+  const owner = {
+    id: found.user.id,
+    name: found.user.name,
+    slug: found.user.slug,
+    isAdmin: found.user.isAdmin,
+  };
+  const html = await renderPage({ env: c.env, user: owner, source: "ui:dynamic-page" }, found.page);
+  c.header("Cache-Control", "no-store");
+  return c.html(
+    <Layout user={signedIn ?? null} currentPath={`/${userSlug}/${pageSlug}`}>
+      <article class="content">{raw(html)}</article>
+    </Layout>,
+  );
+});

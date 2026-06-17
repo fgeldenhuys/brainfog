@@ -28,9 +28,23 @@ export default async function globalSetup() {
   const tokenHash = await hashToken(TOKEN, secret);
   const nonAdminTokenHash = await hashToken(NON_ADMIN_TOKEN, secret);
   const ownerIds = `'${USER_ID}', '${NON_ADMIN_USER_ID}'`;
+  execFileSync(
+    "wrangler",
+    [
+      "d1",
+      "execute",
+      "brainfog",
+      "--local",
+      "--file",
+      path.join(workerDir, "../../packages/db/migrations/0007_user_pages.sql"),
+    ],
+    { cwd: workerDir, stdio: "inherit" },
+  );
   const sql = [
     "PRAGMA foreign_keys=OFF",
     `DELETE FROM dependency_edges WHERE owner_id IN (${ownerIds})`,
+    `DELETE FROM page_access_links WHERE owner_id IN (${ownerIds})`,
+    `DELETE FROM pages WHERE owner_id IN (${ownerIds})`,
     `DELETE FROM document_chunks WHERE document_id IN (SELECT id FROM documents WHERE owner_id IN (${ownerIds}))`,
     `DELETE FROM thoughts WHERE owner_id IN (${ownerIds})`,
     `DELETE FROM facts WHERE owner_id IN (${ownerIds})`,

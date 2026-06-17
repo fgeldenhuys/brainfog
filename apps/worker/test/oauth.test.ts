@@ -671,19 +671,17 @@ describe("Regression: static bearer token paths still work", () => {
     });
     const tokens = (await tokenResp.json()) as { access_token: string };
 
-    // Now make MCP request with OAuth token and verify it works
-    const response = await SELF.fetch("https://example.com/mcp", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${tokens.access_token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "tools/list",
-      }),
-    });
-    expect(response.status).not.toBe(401);
+    // Now make MCP request with OAuth token and verify it works after page tools are registered.
+    const session = await mcpSession(tokens.access_token);
+    const response = await mcpRequest(
+      { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+      session,
+      tokens.access_token,
+    );
+    expect(response.response.status).not.toBe(401);
+    const toolNames = (
+      response.message as { result?: { tools?: { name: string }[] } }
+    ).result?.tools?.map((tool) => tool.name);
+    expect(toolNames).toEqual(expect.arrayContaining(["create_page", "create_page_access_link"]));
   });
 });

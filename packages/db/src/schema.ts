@@ -32,6 +32,64 @@ const timestamps = {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
 };
 
+export const pages = sqliteTable(
+  "pages",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    source: text("source").notNull(),
+    slug: text("slug").notNull(),
+    title: text("title").notNull(),
+    description: text("description"),
+    status: text("status").notNull().default("draft"),
+    template: text("template").notNull(),
+    queries: text("queries", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'`),
+    validationErrors: text("validation_errors", { mode: "json" })
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'`),
+    ...timestamps,
+  },
+  (table) => [
+    check("pages_status_check", sql`${table.status} in ('draft','published','archived')`),
+    unique("pages_owner_slug_unique").on(table.ownerId, table.slug),
+    index("pages_owner_status_idx").on(table.ownerId, table.status),
+    index("pages_owner_slug_idx").on(table.ownerId, table.slug),
+  ],
+);
+
+export const pageAccessLinks = sqliteTable(
+  "page_access_links",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    pageId: text("page_id")
+      .notNull()
+      .references(() => pages.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    label: text("label"),
+    secretHash: text("secret_hash").notNull().unique(),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    maxUses: integer("max_uses"),
+    useCount: integer("use_count").notNull().default(0),
+    lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+    revokedAt: integer("revoked_at", { mode: "timestamp" }),
+    ...timestamps,
+  },
+  (table) => [
+    index("page_access_links_owner_page_idx").on(table.ownerId, table.pageId),
+    index("page_access_links_secret_hash_idx").on(table.secretHash),
+    index("page_access_links_expires_at_idx").on(table.expiresAt),
+  ],
+);
+
 export const projects = sqliteTable(
   "projects",
   {

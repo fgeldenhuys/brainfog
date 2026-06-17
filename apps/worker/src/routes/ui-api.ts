@@ -13,6 +13,17 @@ import {
   updateUser,
 } from "../memory";
 import { type AuthVariables, authMiddleware } from "../middleware/auth";
+import {
+  createPage,
+  createPageAccessLink,
+  deletePage,
+  getPage,
+  listPageAccessLinks,
+  listPages,
+  previewPage,
+  revokePageAccessLink,
+  updatePage,
+} from "../pages";
 
 export const uiApiRoutes = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
@@ -71,6 +82,58 @@ uiApiRoutes.get(
       }),
     ),
   ),
+);
+
+uiApiRoutes.get(
+  "/pages",
+  route(async (c) => c.json(await listPages(ctx(c), { status: c.req.query("status") }))),
+);
+
+uiApiRoutes.post(
+  "/pages",
+  route(async (c) =>
+    c.json(await createPage(ctx(c), (await body(c)) as Parameters<typeof createPage>[1]), 201),
+  ),
+);
+
+uiApiRoutes.get(
+  "/pages/:id",
+  route(async (c) => c.json(await getPage(ctx(c), param(c, "id")))),
+);
+
+uiApiRoutes.patch(
+  "/pages/:id",
+  route(async (c) => c.json(await updatePage(ctx(c), param(c, "id"), await body(c)))),
+);
+
+uiApiRoutes.delete(
+  "/pages/:id",
+  route(async (c) => c.json(await deletePage(ctx(c), param(c, "id")))),
+);
+
+uiApiRoutes.post(
+  "/pages/:id/preview",
+  route(async (c) => c.json(await previewPage(ctx(c), { id: param(c, "id"), ...(await body(c)) }))),
+);
+
+uiApiRoutes.post(
+  "/pages/:id/access-links",
+  route(async (c) =>
+    c.json(
+      await createPageAccessLink(ctx(c), param(c, "id"), await body(c), new URL(c.req.url).origin),
+      201,
+    ),
+  ),
+);
+
+uiApiRoutes.get(
+  "/pages/:id/access-links",
+  route(async (c) => c.json(await listPageAccessLinks(ctx(c), param(c, "id")))),
+);
+
+uiApiRoutes.delete(
+  "/page-access-links/:id",
+  route(async (c) => c.json(await revokePageAccessLink(ctx(c), param(c, "id")))),
 );
 
 uiApiRoutes.get(

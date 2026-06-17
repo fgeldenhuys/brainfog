@@ -30,6 +30,16 @@ import {
   upsertPerson,
   whoami,
 } from "../memory";
+import {
+  createPage,
+  createPageAccessLink,
+  getPage,
+  listPageAccessLinks,
+  listPages,
+  previewPage,
+  revokePageAccessLink,
+  updatePage,
+} from "../pages";
 
 /**
  * Streamable HTTP MCP server (ADR-003), mounted at `/mcp` behind the
@@ -406,6 +416,69 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         shared: z.boolean(),
       },
       (args) => setShared(this.memoryCtx(), args as Parameters<typeof setShared>[1]),
+    );
+    register(
+      "create_page",
+      "Create a dynamic user page definition.",
+      {
+        title: z.string(),
+        slug: z.string(),
+        template: z.string(),
+        queries: z.unknown(),
+        description: nullableString,
+        status: z.enum(["draft", "published", "archived"]).optional(),
+      },
+      (args) => createPage(this.memoryCtx(), args as Parameters<typeof createPage>[1]),
+    );
+    register(
+      "update_page",
+      "Update a dynamic user page definition.",
+      {
+        id: z.string(),
+        title: z.string().optional(),
+        slug: z.string().optional(),
+        template: z.string().optional(),
+        queries: z.unknown().optional(),
+        description: nullableString,
+        status: z.enum(["draft", "published", "archived"]).optional(),
+      },
+      ({ id, ...args }) => updatePage(this.memoryCtx(), String(id), args),
+    );
+    register(
+      "list_pages",
+      "List dynamic user page definitions.",
+      { status: z.string().optional() },
+      (args) => listPages(this.memoryCtx(), args as { status?: string }),
+    );
+    register("get_page", "Get a dynamic page definition.", { id: z.string() }, (args) =>
+      getPage(this.memoryCtx(), String(args.id)),
+    );
+    register(
+      "preview_page",
+      "Validate and render a non-persisted page preview.",
+      { template: z.string(), queries: z.unknown() },
+      (args) => previewPage(this.memoryCtx(), args as Parameters<typeof previewPage>[1]),
+    );
+    register(
+      "create_page_access_link",
+      "Create a pre-authenticated page URL and return the plaintext URL exactly once.",
+      {
+        page_id: z.string(),
+        expires_at: nullableNumber,
+        ttl_seconds: z.number().optional(),
+        max_uses: z.number().int().nullable().optional(),
+        label: nullableString,
+      },
+      ({ page_id, ...args }) => createPageAccessLink(this.memoryCtx(), String(page_id), args),
+    );
+    register(
+      "list_page_access_links",
+      "List page access-link metadata without secrets.",
+      { page_id: z.string() },
+      (args) => listPageAccessLinks(this.memoryCtx(), String(args.page_id)),
+    );
+    register("revoke_page_access_link", "Revoke a page access link.", { id: z.string() }, (args) =>
+      revokePageAccessLink(this.memoryCtx(), String(args.id)),
     );
   }
 

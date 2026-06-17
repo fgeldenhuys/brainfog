@@ -1,8 +1,10 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
-import { createDb, tokens, users } from "@brainfog/db";
+import { createDb, pageAccessLinks, pages, thoughts, tokens, users } from "@brainfog/db";
 import { hashToken } from "@brainfog/shared";
+import { and, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { addDocument, createProject, remember } from "../src/memory";
+import { createPage, createPageAccessLink, revokePageAccessLink } from "../src/pages";
 
 const ADMIN_TOKEN = "ui-pages-admin-token";
 const USER_TOKEN = "ui-pages-user-token";
@@ -11,6 +13,74 @@ const USER_ID = "ui-pages-user";
 
 function cookie(token: string) {
   return { Cookie: `brainfog_token=${token}` };
+}
+
+async function mcpRequest(
+  body: Record<string, unknown>,
+  sessionId?: string,
+  token = ADMIN_TOKEN,
+): Promise<{ response: Response; message?: Record<string, unknown>; sessionId?: string }> {
+  const response = await SELF.fetch("https://example.com/mcp", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  const dataLine = text
+    .split("\n")
+    .find((line) => line.startsWith("data: "))
+    ?.slice("data: ".length);
+  const message = (dataLine ? JSON.parse(dataLine) : text ? JSON.parse(text) : undefined) as
+    | Record<string, unknown>
+    | undefined;
+  return { response, message, sessionId: response.headers.get("mcp-session-id") ?? sessionId };
+}
+
+async function mcpSession(token = ADMIN_TOKEN) {
+  const init = await mcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "brainfog-ui-pages-test", version: "0.1.0" },
+      },
+    },
+    undefined,
+    token,
+  );
+  expect(init.response.status).toBe(200);
+  expect(init.sessionId).toBeTruthy();
+  await mcpRequest(
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    init.sessionId,
+    token,
+  );
+  return init.sessionId ?? "";
+}
+
+async function callMcpToolRaw(name: string, args: Record<string, unknown>, token = ADMIN_TOKEN) {
+  const session = await mcpSession(token);
+  const result = await mcpRequest(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } },
+    session,
+    token,
+  );
+  expect(result.response.status).toBe(200);
+  return result.message as { result?: { content?: { text?: string }[] }; error?: unknown };
+}
+
+async function callMcpTool<T>(name: string, args: Record<string, unknown>, token = ADMIN_TOKEN) {
+  const message = await callMcpToolRaw(name, args, token);
+  expect(message.error).toBeUndefined();
+  return JSON.parse(message.result?.content?.[0]?.text ?? "null") as T;
 }
 
 describe("authenticated UI pages", () => {
@@ -120,5 +190,186 @@ describe("authenticated UI pages", () => {
     });
     expect(response.status).toBe(200);
     expect(await response.text()).toContain("searchable UI thought");
+  });
+
+  it("renders owner-scoped dynamic pages and rejects unsafe templates", async () => {
+    const adminCtx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:page",
+    };
+    const userCtx = {
+      env,
+      user: { id: USER_ID, name: "UI User", slug: "ui-user", isAdmin: false },
+      source: "test:page",
+    };
+    const privateThought = await remember(userCtx, { content: "other user shared secret" });
+    await createDb(env.DB)
+      .update(thoughts)
+      .set({ shared: true })
+      .where(eq(thoughts.id, privateThought.id));
+
+    await expect(
+      createPage(adminCtx, {
+        title: "Unsafe",
+        slug: "unsafe",
+        status: "draft",
+        template:
+          '<section><script>alert(1)</script><a href="javascript:alert(1)">bad</a></section>',
+        queries: {},
+      }),
+    ).rejects.toThrow(/disallowed tag|href/);
+    const unsafeRows = await createDb(env.DB)
+      .select({ id: pages.id })
+      .from(pages)
+      .where(and(eq(pages.ownerId, ADMIN_ID), eq(pages.slug, "unsafe")));
+    expect(unsafeRows).toHaveLength(0);
+
+    const page = await createPage(adminCtx, {
+      title: "Daily Review",
+      slug: "daily-review",
+      status: "published",
+      template: "<section><h1>{{page.title}}</h1>{{#items}}<p>{{content}}</p>{{/items}}</section>",
+      queries: { items: { kind: "thoughts", filters: { id: privateThought.id }, limit: 10 } },
+    });
+
+    const rendered = await SELF.fetch("https://example.com/ui-admin/daily-review", {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(rendered.status).toBe(200);
+    const html = await rendered.text();
+    expect(html).toContain("Daily Review");
+    expect(html).not.toContain("other user shared secret");
+
+    const denied = await SELF.fetch("https://example.com/ui-admin/daily-review", {
+      headers: cookie(USER_TOKEN),
+    });
+    expect(denied.status).toBe(404);
+
+    const link = await createPageAccessLink(
+      adminCtx,
+      page.id,
+      { ttl_seconds: 60, max_uses: 1 },
+      "https://example.com",
+    );
+    const exchange = await SELF.fetch(link.url, { redirect: "manual" });
+    expect(exchange.status).toBe(302);
+    expect(exchange.headers.get("set-cookie")).toContain("HttpOnly");
+    expect(exchange.headers.get("location")).toBe("/ui-admin/daily-review");
+
+    const badExisting = await SELF.fetch("https://example.com/ui-admin/daily-review?access=bad", {
+      redirect: "manual",
+    });
+    const badMissing = await SELF.fetch("https://example.com/ui-admin/missing?access=bad", {
+      redirect: "manual",
+    });
+    expect(badExisting.status).toBe(badMissing.status);
+    expect(badExisting.status).toBe(404);
+  });
+
+  it("enforces pre-auth access link expiry, use-count, and revocation boundaries", async () => {
+    const adminCtx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:page",
+    };
+    const suffix = Date.now().toString(36);
+    const page = await createPage(adminCtx, {
+      title: "Access Boundaries",
+      slug: `access-boundaries-${suffix}`,
+      status: "published",
+      template: "<section><h1>{{page.title}}</h1></section>",
+      queries: {},
+    });
+
+    const oneUse = await createPageAccessLink(
+      adminCtx,
+      page.id,
+      { ttl_seconds: 60, max_uses: 1 },
+      "https://example.com",
+    );
+    expect((await SELF.fetch(oneUse.url, { redirect: "manual" })).status).toBe(302);
+    expect((await SELF.fetch(oneUse.url, { redirect: "manual" })).status).toBe(404);
+
+    const expired = await createPageAccessLink(
+      adminCtx,
+      page.id,
+      { ttl_seconds: -1, max_uses: 1 },
+      "https://example.com",
+    );
+    expect((await SELF.fetch(expired.url, { redirect: "manual" })).status).toBe(404);
+
+    const revoked = await createPageAccessLink(
+      adminCtx,
+      page.id,
+      { ttl_seconds: 60, max_uses: 1 },
+      "https://example.com",
+    );
+    await revokePageAccessLink(adminCtx, revoked.id);
+    expect((await SELF.fetch(revoked.url, { redirect: "manual" })).status).toBe(404);
+  });
+
+  it("exercises MCP page tools with static bearer auth and one-time access-link secrecy", async () => {
+    const slug = `mcp-page-${Date.now().toString(36)}`;
+    const page = await callMcpTool<{ id: string; ownerId: string; slug: string }>("create_page", {
+      title: "MCP Page",
+      slug,
+      status: "published",
+      template: "<section><h1>{{page.title}}</h1></section>",
+      queries: {},
+    });
+    expect(page.ownerId).toBe(ADMIN_ID);
+
+    const preview = await callMcpTool<{ html: string }>("preview_page", {
+      template: "<section><p>Preview</p></section>",
+      queries: {},
+    });
+    expect(preview.html).toContain("Preview");
+
+    const link = await callMcpTool<{ id: string; url: string }>("create_page_access_link", {
+      page_id: page.id,
+      ttl_seconds: 60,
+      max_uses: 1,
+      label: "mcp once",
+    });
+    expect(link.url).toMatch(new RegExp(`^/ui-admin/${slug}\\?access=`));
+    expect(link.url).not.toContain("example.com");
+
+    const secret = new URL(link.url, "https://example.com").searchParams.get("access") ?? "";
+    expect(secret).toBeTruthy();
+    const stored = await createDb(env.DB)
+      .select({ secretHash: pageAccessLinks.secretHash })
+      .from(pageAccessLinks)
+      .where(eq(pageAccessLinks.id, link.id));
+    expect(stored[0]?.secretHash).toBeTruthy();
+    expect(stored[0]?.secretHash).not.toContain(secret);
+
+    const links = await callMcpTool<Record<string, unknown>[]>("list_page_access_links", {
+      page_id: page.id,
+    });
+    expect(links).toHaveLength(1);
+    expect(links[0]).not.toHaveProperty("url");
+    expect(JSON.stringify(links)).not.toContain(secret);
+
+    const userPages = await callMcpTool<{ id: string }[]>("list_pages", {}, USER_TOKEN);
+    expect(userPages.map((row) => row.id)).not.toContain(page.id);
+  });
+
+  it("keeps reserved top-level routes outside dynamic page routing", async () => {
+    for (const path of [
+      "/api/v1/health",
+      "/mcp",
+      "/app",
+      "/assets/htmx.min.js",
+      "/authorize",
+      "/token",
+      "/register",
+      "/.well-known/oauth-authorization-server",
+    ]) {
+      const response = await SELF.fetch(`https://example.com${path}`, {
+        headers: cookie(ADMIN_TOKEN),
+      });
+      expect(response.status).not.toBe(404);
+    }
   });
 });

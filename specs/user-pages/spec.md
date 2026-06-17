@@ -15,7 +15,7 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
 - **Route Shape**:
   - `GET /:user_slug/` renders the authenticated user's dynamic-page index for that slug.
   - `GET /:user_slug/:page_slug` renders a dynamic page definition owned by the user identified by `user_slug`.
-  - Reserved top-level path segments are not valid user slugs: `api`, `mcp`, `app`, `assets`, `login`, `logout`, and `health`.
+  - Reserved top-level path segments are not valid user slugs: `api`, `mcp`, `app`, `assets`, `authorize`, `token`, `register`, `.well-known`, `login`, `logout`, and `health`.
 
 - **Authentication And Authorization**:
   - User pages remain behind the existing bearer-token/cookie authentication model (`ARCHITECTURE.md` invariant 6). They are not public in this spec.
@@ -55,8 +55,9 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
   - `template` is an HTML-like server-rendered template, not arbitrary HTML execution. It supports a small allowlist of structural tags (`section`, `article`, `header`, `footer`, `h1`-`h4`, `p`, `ul`, `ol`, `li`, `table`, `thead`, `tbody`, `tr`, `th`, `td`, `dl`, `dt`, `dd`, `blockquote`, `code`, `pre`, `strong`, `em`, `small`, `a`, `time`, `div`, `span`) and safe attributes (`class`, `href` for same-origin or `https:`, `title`, `datetime`, `data-*`).
   - Disallowed in stored templates: `script`, inline event handlers, `style` attributes, arbitrary `hx-*` attributes, external resources, forms that submit to arbitrary routes, raw SQL, and unescaped output.
   - Template variables use escaped interpolation by default: `{{field}}`. Raw interpolation is not supported in v1.
-  - Iteration uses named datasets from `queries`, for example `{{#each recent_thoughts}} ... {{content}} ... {{/each}}`.
-  - Conditional rendering is limited to existence checks, for example `{{#if project_name}} ... {{/if}}`.
+  - Iteration uses Mustache-style sections over named datasets from `queries`, for example `{{#recent_thoughts}} ... {{content}} ... {{/recent_thoughts}}`.
+  - Conditional rendering is limited to Mustache-style truthy sections, for example `{{#project_name}} ... {{project_name}} ... {{/project_name}}`, and inverted sections for empty states, for example `{{^recent_thoughts}}No recent thoughts.{{/recent_thoughts}}`.
+  - Display-specific shaping happens server-side before rendering: query results may be mapped into a bounded view model with derived display fields such as formatted dates, short labels, status labels, counts, and grouped arrays. Page-authored client-side JavaScript is not allowed for transforming data in v1.
   - The renderer must fail closed: an invalid template or query definition returns a validation error and never partially executes unsafe content.
 
 - **Dynamic Page Queries**:
@@ -76,7 +77,7 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
   - Default expiry is 24 hours when neither `expires_at` nor `ttl_seconds` is supplied. `max_uses` defaults to `1` unless explicitly set higher.
 
 - **Dependencies**:
-  - Runtime dependencies remain `hono`, `agents`, and `drizzle-orm` plus the existing project dependencies.
+  - Runtime dependencies remain `hono`, `agents`, and `drizzle-orm` plus the existing project dependencies, with the approved addition of `mustache` for logic-less escaped rendering and one pure-JS HTML parser/validator package such as `htmlparser2` or `parse5`.
   - No new Cloudflare product or binding is required.
 
 - **Constraints**:
@@ -85,26 +86,28 @@ PBI-007 (`tasks/PBI-007-user-pages.md`) implements this spec after PBI-006.
   - Page rendering must not bypass auth, owner scoping, provenance, or the memory service layer.
   - Pre-authenticated page URLs are credentials. They must be short-lived by default, revocable, logged only as metadata, and never displayed again after creation.
   - User-authored templates are untrusted input. They must be parsed/validated and rendered with escaping; `dangerouslySetInnerHTML` may only receive output from the trusted template renderer after validation/sanitization.
-  - `/api/v1/*`, `/mcp`, `/app/*`, and `/:user_slug/*` must not conflict; reserved slugs are rejected at user creation/update time.
+  - `/api/v1/*`, `/mcp`, `/app/*`, `/assets/*`, `/authorize`, `/token`, `/register`, `/.well-known/*`, and `/:user_slug/*` must not conflict; reserved slugs are rejected at user creation/update time.
   - Dynamic pages should return `no-store` by default because rendered content is authenticated personal memory.
 
 ## Contract
 
 ### Definition Of Done
 
-- [ ] `pages` table exists with owner-scoped slug uniqueness, status lifecycle, template text, query JSON, validation errors, provenance, and timestamps.
-- [ ] `page_access_links` table exists with hashed secrets, page ownership, expiry, optional max-use count, use count, revocation, provenance, and timestamps.
-- [ ] MCP tools `create_page`, `update_page`, `list_pages`, `get_page`, and `preview_page` exist and are authenticated/owner-scoped.
-- [ ] MCP tools `create_page_access_link`, `list_page_access_links`, and `revoke_page_access_link` exist; plaintext access URLs are returned only at creation time.
-- [ ] REST page-management routes under `/api/v1/ui/pages` exist and call the same service layer as the MCP page tools.
-- [ ] REST access-link routes under `/api/v1/ui/pages/:id/access-links` and `/api/v1/ui/page-access-links/:id` exist and call the same service layer as the MCP access-link tools.
-- [ ] Users can list, create, edit, preview, publish/archive, and delete their own page definitions from a basic UI surface.
-- [ ] Dynamic pages render at `/:user_slug/:page_slug` for the authenticated matching user and return `404` or `403` without revealing whether another user's page exists.
-- [ ] Dynamic pages can also render through a valid pre-authenticated URL for that exact page; the URL secret is exchanged for a page-scoped HTTP-only cookie and removed from the visible URL via redirect.
-- [ ] The template renderer validates the allowed tag/attribute subset, escapes all data interpolation, rejects disallowed constructs, and fails closed with validation errors.
-- [ ] Dynamic page queries accept only validated JSON definitions, never SQL, and enforce owner scope plus per-dataset row limits.
-- [ ] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for page validation, unsafe template rejection, owner-scoped dynamic rendering, access-link expiry/use/revocation, and pre-auth scope boundaries.
-- [ ] `pnpm test:e2e` covers creating or seeding a page, rendering a published dynamic page under `/:user_slug/:page_slug`, and using a pre-authenticated page URL.
+- [x] `pages` table exists with owner-scoped slug uniqueness, status lifecycle, template text, query JSON, validation errors, provenance, and timestamps.
+- [x] `page_access_links` table exists with hashed secrets, page ownership, expiry, optional max-use count, use count, revocation, provenance, and timestamps.
+- [x] MCP tools `create_page`, `update_page`, `list_pages`, `get_page`, and `preview_page` exist and are authenticated/owner-scoped.
+- [x] MCP tools `create_page_access_link`, `list_page_access_links`, and `revoke_page_access_link` exist; plaintext access URLs are returned only at creation time.
+- [x] REST page-management routes under `/api/v1/ui/pages` exist and call the same service layer as the MCP page tools.
+- [x] REST access-link routes under `/api/v1/ui/pages/:id/access-links` and `/api/v1/ui/page-access-links/:id` exist and call the same service layer as the MCP access-link tools.
+- [x] Users can list, create, edit, preview, publish/archive, and delete their own page definitions from a basic UI surface.
+- [x] Dynamic pages render at `/:user_slug/:page_slug` for the authenticated matching user and return `404` or `403` without revealing whether another user's page exists.
+- [x] Dynamic pages can also render through a valid pre-authenticated URL for that exact page; the URL secret is exchanged for a page-scoped HTTP-only cookie and removed from the visible URL via redirect.
+- [x] The template renderer validates the allowed tag/attribute subset, escapes all data interpolation, rejects disallowed constructs, and fails closed with validation errors.
+- [x] Dynamic page queries accept only validated JSON definitions, never SQL, and enforce owner scope plus per-dataset row limits.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass, including coverage for page validation, unsafe template rejection, owner-scoped dynamic rendering, access-link expiry/use/revocation, and pre-auth scope boundaries.
+- [x] `pnpm test:e2e` covers creating or seeding a page, rendering a published dynamic page under `/:user_slug/:page_slug`, and using a pre-authenticated page URL.
+
+Completion evidence: PBI-007 implementation added `pages` and `page_access_links` schema/migration, a shared page service, Mustache plus parse5 fail-closed template validation/rendering, strict page-owner query execution with server-side display view-model shaping, MCP page/access-link tools, REST page/access-link routes under `/api/v1/ui`, default UI page management, dynamic routes under `/:user_slug/` and `/:user_slug/:page_slug`, and narrow pre-authenticated page links using hashed one-time secrets and page-scoped HTTP-only cookies. Verification on 2026-06-17: `pnpm check && pnpm typecheck && pnpm test` passed with 145 Vitest tests; `pnpm test:e2e` passed with 3 Playwright tests. Critic review initially found blocking issues around invalid draft persistence, pre-auth enumeration by status, a hardcoded MCP access-link origin, and missing MCP/access-link boundary tests; a focused fix pass resolved all four, and final critic confirmation reported no blocking issues.
 
 ### Regression Guardrails
 

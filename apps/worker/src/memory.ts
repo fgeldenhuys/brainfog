@@ -37,6 +37,8 @@ const suffix = {
   documentChunk: "c",
   thought: "t",
   dependencyEdge: "e",
+  page: "g",
+  pageAccessLink: "a",
 } as const;
 
 export const graphKinds = [
@@ -78,7 +80,7 @@ export function createId(kind: keyof typeof suffix) {
 }
 
 export const isBrainfogId = (value: string, typeSuffix?: string) =>
-  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteun]"}$`).test(value);
+  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteunga]"}$`).test(value);
 
 function now() {
   return new Date();
@@ -2375,7 +2377,23 @@ export async function getChunksForDocument(ctx: Ctx, documentId: string) {
 }
 
 // Reserved slugs that would collide with route prefixes per ARCHITECTURE.md
-const reservedSlugs = new Set(["app", "api", "mcp", "assets", "admin", "system", "brainfog"]);
+const reservedSlugs = new Set([
+  "api",
+  "mcp",
+  "app",
+  "assets",
+  "authorize",
+  "token",
+  "register",
+  ".well-known",
+  "well-known",
+  "login",
+  "logout",
+  "health",
+  "admin",
+  "system",
+  "brainfog",
+]);
 
 export function validateSlug(slug: string | null | undefined): string | null {
   if (!slug) return null;
