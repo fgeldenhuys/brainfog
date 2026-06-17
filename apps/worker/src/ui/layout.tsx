@@ -95,8 +95,10 @@ export const Layout: FC<{
         <style>{`
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: system-ui, sans-serif; background: #f5f5f5; }
-          header { background: white; border-bottom: 1px solid #ddd; padding: 1rem; }
-          header h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+          header { background: white; border-bottom: 1px solid #ddd; display: flex; align-items: stretch; padding: 0; }
+          header img.header-logo { display: block; width: auto; flex-shrink: 0; }
+          header .header-content { padding: 1rem; display: flex; flex-direction: column; justify-content: center; gap: 0.5rem; }
+          header h1 { font-size: 1.5rem; }
           header h1 a { color: inherit; text-decoration: none; }
           nav { display: flex; gap: 0; border-top: 1px solid #eee; }
           main { max-width: 1200px; margin: 0 auto; padding: 2rem 1rem; }
@@ -139,26 +141,23 @@ export const Layout: FC<{
           .pagination { display: flex; gap: 1rem; align-items: center; margin: 1rem 0; }
           .table-wrap { background: white; border-radius: 4px; overflow-x: auto; }
           .sparkline { display: block; }
+          .nowrap { white-space: nowrap; }
           h2 { margin-bottom: 1rem; }
           h3 { margin-bottom: 0.5rem; }
         `}</style>
       </head>
       <body hx-boost="true">
         <header>
-          <h1>
-            <img
-              src="/thinker.png"
-              alt=""
-              style="height: 1.5rem; width: 1.5rem; vertical-align: middle; margin-right: 0.5rem;"
-            />
-            <a href="/app">brainfog</a>
-          </h1>
-          {props.user ? (
-            <div style={{ fontSize: "0.9rem", color: "#666" }}>
-              Signed in as <strong>{props.user.name}</strong>
-              {props.user.isAdmin ? <span class="tag">admin</span> : null}
-            </div>
-          ) : null}
+          <img class="header-logo" src="/thinker.png" alt="" />
+          <div class="header-content">
+            <h1><a href="/app">brainfog</a></h1>
+            {props.user ? (
+              <div style={{ fontSize: "0.9rem", color: "#666" }}>
+                Signed in as <strong>{props.user.name}</strong>
+                {props.user.isAdmin ? <span class="tag">admin</span> : null}
+              </div>
+            ) : null}
+          </div>
         </header>
         {props.user ? (
           <nav>
