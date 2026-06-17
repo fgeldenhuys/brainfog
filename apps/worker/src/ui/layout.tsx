@@ -96,7 +96,8 @@ export const Layout: FC<{
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: system-ui, sans-serif; background: #f5f5f5; }
           header { background: white; border-bottom: 1px solid #ddd; display: flex; align-items: stretch; padding: 0; }
-          header img.header-logo { display: block; height: 5rem; width: auto; flex-shrink: 0; }
+          header .header-logo-wrap { align-self: stretch; flex-shrink: 0; overflow: hidden; }
+          header .header-logo-wrap img { display: block; height: 100%; width: auto; }
           header .header-content { padding: 1rem; display: flex; flex-direction: column; justify-content: center; gap: 0.5rem; }
           header h1 { font-size: 1.5rem; }
           header h1 a { color: inherit; text-decoration: none; }
@@ -148,7 +149,9 @@ export const Layout: FC<{
       </head>
       <body hx-boost="true">
         <header>
-          <img class="header-logo" src="/thinker.png" alt="" />
+          <div class="header-logo-wrap">
+            <img src="/thinker.png" alt="" />
+          </div>
           <div class="header-content">
             <h1><a href="/app">brainfog</a></h1>
             {props.user ? (
