@@ -27,6 +27,7 @@ import {
   recall,
   recordFact,
   recordTimeSeriesPoint,
+  recordTimeSeriesPoints,
   remember,
   setSelfPerson,
   setShared,
@@ -210,6 +211,7 @@ apiRoutes.get(
     c.json(
       await listTimeSeriesPoints(ctx(c), {
         series_key: c.req.query("series_key"),
+        series_prefix: c.req.query("series_prefix"),
         project_id: c.req.query("project_id"),
         subject_type: c.req.query("subject_type"),
         subject_id: c.req.query("subject_id"),
@@ -218,6 +220,10 @@ apiRoutes.get(
       }),
     ),
   ),
+);
+apiRoutes.post(
+  "/time-series-points/batch",
+  route(async (c) => c.json(await recordTimeSeriesPoints(ctx(c), await body(c)), 201)),
 );
 apiRoutes.post(
   "/time-series-points",

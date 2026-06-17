@@ -21,6 +21,7 @@ import {
   recall,
   recordFact,
   recordTimeSeriesPoint,
+  recordTimeSeriesPoints,
   remember,
   setSelfPerson,
   setShared,
@@ -284,7 +285,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "record_time_series_point",
-      "Append a generic time-series point.",
+      "Append a single generic time-series point. Use dot-namespaced series_key (e.g. 'electricity.spent', 'sleep.hours'). For multiple related metrics at the same timestamp, use record_time_series_points (bulk) instead. value is the primary numeric scalar (e.g. hours slept, ZAR spent); use metadata for secondary readings and contextual data. Before recording points for a new series namespace, call recall to check for an existing convention fact, then record_fact to document the namespace, series names, units, and metadata schema if one does not exist. This ensures consistency across future insertions.",
       {
         series_key: z.string(),
         value: nullableNumber,
@@ -299,9 +300,10 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "list_time_series_points",
-      "List time-series points.",
+      "List time-series points. Filter by exact series_key or by series_prefix (e.g. series_prefix='electricity' matches 'electricity.before', 'electricity.after', etc.). series_key and series_prefix are mutually exclusive. Use series_prefix to query all metrics under a namespace efficiently. Optionally filter by project_id, subject (type/id), or time range (from/to as Unix seconds). Series naming uses dot-delimited namespaces (domain.metric); value is the primary scalar, metadata holds secondary data. Before recording a new namespace, call recall to check for a convention fact, then record_fact to document the convention if needed.",
       {
         series_key: z.string().optional(),
+        series_prefix: z.string().optional(),
         project_id: z.string().optional(),
         subject_type: z.string().optional(),
         subject_id: z.string().optional(),
@@ -309,6 +311,25 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         to: z.number().optional(),
       },
       (args) => listTimeSeriesPoints(this.memoryCtx(), args as Record<string, string | undefined>),
+    );
+    register(
+      "record_time_series_points",
+      "Append multiple time-series points in a single batch. points is an array of objects, each with series_key, optional value, unit, observed_at, project_id, and metadata. Use dot-namespaced series_key (e.g. 'electricity.spent'). For related multi-value observations at the same timestamp, record each metric as a separate point in the batch; this keeps each metric independently queryable and plottable. value is the primary scalar; use metadata for secondary/contextual data. Before recording a new series namespace, call recall to check for a convention fact, then record_fact to document the namespace if needed. All rows in the batch are inserted in a single atomic operation; if any row fails validation, the entire batch is rejected.",
+      {
+        points: z
+          .array(
+            z.object({
+              series_key: z.string(),
+              value: nullableNumber,
+              unit: nullableString,
+              observed_at: nullableNumber,
+              project_id: nullableString,
+              metadata: obj,
+            }),
+          )
+          .optional(),
+      },
+      (args) => recordTimeSeriesPoints(this.memoryCtx(), args),
     );
     register(
       "upsert_person",

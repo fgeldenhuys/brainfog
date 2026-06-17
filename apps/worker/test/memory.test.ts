@@ -784,6 +784,158 @@ describe("memory model REST service", () => {
     expect(otherUsersPoints).toEqual([]);
   });
 
+  it("bulk inserts multiple time-series points in a single batch", async () => {
+    const points = (await json(
+      await authFetch("/api/v1/time-series-points/batch", {
+        method: "POST",
+        body: JSON.stringify({
+          points: [
+            {
+              series_key: "electricity.before",
+              value: 375,
+              unit: "kWh",
+              observed_at: 1_800_000_000,
+              metadata: { topology: "meter1" },
+            },
+            {
+              series_key: "electricity.after",
+              value: 583,
+              unit: "kWh",
+              observed_at: 1_800_000_000,
+              metadata: { topology: "meter1" },
+            },
+            {
+              series_key: "electricity.spent",
+              value: 208,
+              unit: "kWh",
+              observed_at: 1_800_000_000,
+            },
+          ],
+        }),
+      }),
+    )) as Array<{
+      id: string;
+      ownerId: string;
+      source: string;
+      seriesKey: string;
+      value: number | null;
+      unit: string | null;
+      metadata: Record<string, unknown>;
+    }>;
+
+    expect(points).toHaveLength(3);
+    const [p0, p1, p2] = points;
+    if (!p0 || !p1 || !p2) {
+      throw new Error("Expected 3 points");
+    }
+    expect(p0.ownerId).toBe("user-memory-a");
+    expect(p0.source).toBe("rest:api");
+    expect(p0.seriesKey).toBe("electricity.before");
+    expect(p0.value).toBe(375);
+    expect(p1.seriesKey).toBe("electricity.after");
+    expect(p2.seriesKey).toBe("electricity.spent");
+  });
+
+  it("rejects bulk insert if any point has invalid project_id", async () => {
+    const response = await authFetch("/api/v1/time-series-points/batch", {
+      method: "POST",
+      body: JSON.stringify({
+        points: [
+          {
+            series_key: "bulk.test.before",
+            value: 375,
+            observed_at: 1_800_000_000,
+          },
+          {
+            series_key: "bulk.test.after",
+            value: 583,
+            project_id: `bf${"0".repeat(20)}r`, // Invalid project ID
+            observed_at: 1_800_000_000,
+          },
+        ],
+      }),
+    });
+
+    expect(response.status).toBe(404);
+    // Verify no points were inserted
+    const allPoints = await json<Array<{ seriesKey: string }>>(
+      await authFetch("/api/v1/time-series-points"),
+    );
+    const bulkTest = allPoints.filter((p) => p.seriesKey.startsWith("bulk.test."));
+    expect(bulkTest).toHaveLength(0);
+  });
+
+  it("filters time-series points by series_prefix", async () => {
+    // Insert points with different namespaces
+    const uniqueSuffix = Date.now();
+    await json(
+      await authFetch("/api/v1/time-series-points/batch", {
+        method: "POST",
+        body: JSON.stringify({
+          points: [
+            {
+              series_key: `ptest.electricity${uniqueSuffix}.before`,
+              value: 100,
+              observed_at: 1_800_000_000,
+            },
+            {
+              series_key: `ptest.electricity${uniqueSuffix}.after`,
+              value: 200,
+              observed_at: 1_800_000_000,
+            },
+            {
+              series_key: `ptest.electricity${uniqueSuffix}.spent`,
+              value: 100,
+              observed_at: 1_800_000_000,
+            },
+            {
+              series_key: `ptest.sleep${uniqueSuffix}.hours`,
+              value: 8,
+              observed_at: 1_800_000_000,
+            },
+            {
+              series_key: `ptest.sleep${uniqueSuffix}.quality`,
+              value: 0.8,
+              observed_at: 1_800_000_000,
+            },
+          ],
+        }),
+      }),
+    );
+
+    // Query by prefix
+    const electricityPoints = await json<Array<{ seriesKey: string }>>(
+      await authFetch(`/api/v1/time-series-points?series_prefix=ptest.electricity${uniqueSuffix}`),
+    );
+    expect(electricityPoints).toHaveLength(3);
+    expect(
+      electricityPoints.every((p) => p.seriesKey.startsWith(`ptest.electricity${uniqueSuffix}.`)),
+    ).toBe(true);
+
+    const sleepPoints = await json<Array<{ seriesKey: string }>>(
+      await authFetch(`/api/v1/time-series-points?series_prefix=ptest.sleep${uniqueSuffix}`),
+    );
+    expect(sleepPoints).toHaveLength(2);
+    expect(sleepPoints.every((p) => p.seriesKey.startsWith(`ptest.sleep${uniqueSuffix}.`))).toBe(
+      true,
+    );
+  });
+
+  it("rejects list if both series_key and series_prefix are supplied", async () => {
+    const response = await authFetch(
+      "/api/v1/time-series-points?series_key=electricity.before&series_prefix=electricity",
+    );
+    expect(response.status).toBe(400);
+  });
+
+  it("rejects series_prefix if it contains SQL wildcards", async () => {
+    const response = await authFetch("/api/v1/time-series-points?series_prefix=electric%");
+    expect(response.status).toBe(400);
+
+    const response2 = await authFetch("/api/v1/time-series-points?series_prefix=electric_");
+    expect(response2.status).toBe(400);
+  });
+
   it("deletes thought and fact rows through owner-scoped routes", async () => {
     const thought = await json<{ id: string }>(
       await authFetch("/api/v1/thoughts", {
@@ -1905,6 +2057,7 @@ describe("memory model REST service", () => {
         "update_task",
         "list_tasks",
         "record_time_series_point",
+        "record_time_series_points",
         "list_time_series_points",
         "upsert_person",
         "list_people",
@@ -1920,6 +2073,40 @@ describe("memory model REST service", () => {
         "set_shared",
       ]),
     );
+  });
+
+  it("time-series tool descriptions include agent guidance on convention, metadata, and recall", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      { jsonrpc: "2.0", id: 12, method: "tools/list", params: {} },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const tools = (
+      response.message as {
+        result?: { tools?: Array<{ name: string; description: string }> };
+      }
+    ).result?.tools;
+    expect(tools).toBeDefined();
+
+    const recordPoint = tools?.find((t) => t.name === "record_time_series_point");
+    const recordPoints = tools?.find((t) => t.name === "record_time_series_points");
+    const listPoints = tools?.find((t) => t.name === "list_time_series_points");
+
+    // Verify all three tools have descriptions containing required keywords
+    for (const tool of [recordPoint, recordPoints, listPoints]) {
+      expect(tool?.description).toBeDefined();
+      expect(tool?.description).toMatch(/convention/i);
+      expect(tool?.description).toMatch(/metadata/i);
+      expect(tool?.description).toMatch(/recall/i);
+    }
+
+    // recordPoints should mention "series_prefix"
+    expect(listPoints?.description).toMatch(/series_prefix/i);
+
+    // recordPoint and recordPoints should mention the guidance about documenting conventions
+    expect(recordPoint?.description).toMatch(/record_fact/i);
+    expect(recordPoints?.description).toMatch(/record_fact/i);
   });
 });
 

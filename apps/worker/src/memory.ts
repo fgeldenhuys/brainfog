@@ -13,7 +13,7 @@ import {
   users,
 } from "@brainfog/db";
 import { generateToken, hashToken } from "@brainfog/shared";
-import { and, desc, eq, gte, inArray, isNotNull, lte, or, type SQL, sql } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, isNotNull, like, lte, or, type SQL, sql } from "drizzle-orm";
 import type { Env } from "./env";
 
 export type MemoryUser = {
@@ -1993,6 +1993,46 @@ export async function getDocumentContent(ctx: Ctx, id: string) {
   return { doc, content: await object.text() };
 }
 
+export async function recordTimeSeriesPoints(
+  ctx: Ctx,
+  input: {
+    points?: Array<Record<string, unknown>>;
+  },
+) {
+  const points = input.points ?? [];
+  if (!Array.isArray(points)) {
+    throw new MemoryError(400, "points must be an array");
+  }
+
+  // Validate all rows up front: project existence if supplied
+  for (const point of points) {
+    await ensureProject(ctx, point.project_id as string | undefined);
+  }
+
+  // Build rows and ensure no partial inserts
+  const rows = points.map((point) => ({
+    id: createId("timeSeriesPoint"),
+    ownerId: ctx.user.id,
+    projectId: (point.project_id as string | undefined) ?? null,
+    source: source(ctx),
+    seriesKey: String(point.series_key ?? ""),
+    value: point.value === undefined || point.value === null ? null : Number(point.value),
+    unit: (point.unit as string | undefined) ?? null,
+    observedAt: asDate(point.observed_at) ?? now(),
+    metadata: (point.metadata as Record<string, unknown> | undefined) ?? {},
+  }));
+
+  if (rows.length === 0) {
+    return [];
+  }
+
+  // Single insert call for all rows
+  await createDb(ctx.env.DB).insert(timeSeriesPoints).values(rows);
+
+  // Return the inserted rows
+  return rows;
+}
+
 export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unknown>) {
   await ensureProject(ctx, input.project_id as string | undefined);
   await validateSubject(
@@ -2043,10 +2083,26 @@ async function validateSubject(ctx: Ctx, type?: string, id?: string) {
 }
 
 export async function listTimeSeriesPoints(ctx: Ctx, q: Record<string, string | undefined>) {
+  // Validate that series_key and series_prefix are mutually exclusive
+  if (q.series_key && q.series_prefix) {
+    throw new MemoryError(400, "series_key and series_prefix are mutually exclusive");
+  }
+
+  // Validate that series_prefix does not contain SQL wildcards
+  if (q.series_prefix) {
+    if (q.series_prefix.includes("%") || q.series_prefix.includes("_")) {
+      throw new MemoryError(400, "series_prefix must not contain SQL wildcards (% or _)");
+    }
+  }
+
   const filters = [
     or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
   ];
   if (q.series_key) filters.push(eq(timeSeriesPoints.seriesKey, q.series_key));
+  if (q.series_prefix) {
+    // Use LIKE 'prefix.%' for prefix matching
+    filters.push(like(timeSeriesPoints.seriesKey, `${q.series_prefix}.%`));
+  }
   if (q.project_id) filters.push(eq(timeSeriesPoints.projectId, q.project_id));
   if (q.from) filters.push(gte(timeSeriesPoints.observedAt, asDate(Number(q.from)) ?? now()));
   if (q.to) filters.push(lte(timeSeriesPoints.observedAt, asDate(Number(q.to)) ?? now()));
