@@ -77,6 +77,7 @@ const allowedTransforms = new Set([
   "app_links",
   "count",
   "pivot_by_date",
+  "pivot_by_year",
 ]);
 const allowedTags = new Set([
   "section",
@@ -299,6 +300,50 @@ function pivotByDate(rows: Record<string, unknown>[]): Record<string, unknown>[]
   return Array.from(groups.values());
 }
 
+function pivotByYear(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const MONTH_LABELS = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+
+  // Initialize 12 buckets keyed by month number (1–12)
+  const buckets: Map<number, Record<string, unknown>> = new Map();
+  for (let m = 1; m <= 12; m++) {
+    buckets.set(m, { month: m, month_label: MONTH_LABELS[m - 1] });
+  }
+
+  for (const row of rows) {
+    const dt =
+      row.observedAt instanceof Date
+        ? row.observedAt
+        : row.observedAt
+          ? new Date(String(row.observedAt))
+          : null;
+    if (!dt || Number.isNaN(dt.getTime())) continue;
+    const month = dt.getUTCMonth() + 1; // 1–12
+    const year = dt.getUTCFullYear();
+    const colKey = `y${year}`;
+    if (typeof row.value === "number" && Number.isFinite(row.value)) {
+      const bucket = buckets.get(month);
+      if (bucket) {
+        bucket[colKey] = row.value;
+      }
+    }
+  }
+
+  return Array.from(buckets.values()); // already ordered Jan→Dec
+}
+
 function mapRows(
   kind: QueryKind,
   rows: Record<string, unknown>[],
@@ -307,9 +352,11 @@ function mapRows(
   limit?: number,
 ) {
   const inputRows =
-    transforms.includes("pivot_by_date") && kind === "time_series_points"
-      ? pivotByDate(rows).slice(0, limit)
-      : rows;
+    transforms.includes("pivot_by_year") && kind === "time_series_points"
+      ? pivotByYear(rows).slice(0, limit)
+      : transforms.includes("pivot_by_date") && kind === "time_series_points"
+        ? pivotByDate(rows).slice(0, limit)
+        : rows;
   const withRows = inputRows.map((r) => {
     const out: Record<string, unknown> = { ...r };
     const createdAt = r.createdAt ?? r.created_at;
@@ -481,9 +528,16 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
               ]),
             )
             .orderBy(desc(timeSeriesPoints.observedAt))
-            // When pivot_by_date is active fetch enough pre-pivot rows (assumes ≤20 series);
+            // When pivot_by_date or pivot_by_year is active fetch enough pre-pivot rows;
+            // pivot_by_date needs ≤20 series per date, pivot_by_year needs ≤50 rows (all years).
             // mapRows slices to q.limit after pivoting.
-            .limit(q.transforms.includes("pivot_by_date") ? Math.min(q.limit * 20, 500) : q.limit)
+            .limit(
+              q.transforms.includes("pivot_by_year")
+                ? Math.min(q.limit * 50, 500)
+                : q.transforms.includes("pivot_by_date")
+                  ? Math.min(q.limit * 20, 500)
+                  : q.limit,
+            )
         );
     }
   })();

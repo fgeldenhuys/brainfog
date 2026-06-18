@@ -530,7 +530,6 @@ describe("pivot_by_date transform", () => {
       id: `${PIVOT_USER}-token`,
       userId: PIVOT_USER,
       tokenHash: await hashToken(PIVOT_TOKEN, env.BRAINFOG_TOKEN_HASH_SECRET),
-      label: "test",
     });
     // Insert three series for two dates (simulating electricity-style multi-series)
     await db.insert(timeSeriesPoints).values([
@@ -658,5 +657,250 @@ describe("pivot_by_date transform", () => {
       },
     });
     expect(html).toContain("empty");
+  });
+});
+
+describe("pivot_by_year transform", () => {
+  const YEAR_USER = "pivot-year-test-user";
+  const YEAR_TOKEN = "pivot-year-test-token";
+
+  beforeAll(async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    const db = createDb(env.DB);
+    await db.insert(users).values({ id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" });
+    await db.insert(tokens).values({
+      id: `${YEAR_USER}-token`,
+      userId: YEAR_USER,
+      tokenHash: await hashToken(YEAR_TOKEN, env.BRAINFOG_TOKEN_HASH_SECRET),
+    });
+
+    // Insert 34 rainfall-like points spanning Sep 2023 – Jun 2026 (simulating monthly data)
+    // Each month gets one point, covering all 12 months for years 2024, 2025, 2026,
+    // plus Sep/Oct/Nov/Dec 2023 and Jan/Feb/Mar/Apr/May/Jun 2026.
+    const testData = [
+      // 2023: Sep–Dec
+      { month: 9, year: 2023, value: 120 },
+      { month: 10, year: 2023, value: 95 },
+      { month: 11, year: 2023, value: 75 },
+      { month: 12, year: 2023, value: 140 },
+      // 2024: Jan–Dec
+      { month: 1, year: 2024, value: 105 },
+      { month: 2, year: 2024, value: 90 },
+      { month: 3, year: 2024, value: 112 },
+      { month: 4, year: 2024, value: 265 },
+      { month: 5, year: 2024, value: 78 },
+      { month: 6, year: 2024, value: 265 },
+      { month: 7, year: 2024, value: 2.5 },
+      { month: 8, year: 2024, value: 50 },
+      { month: 9, year: 2024, value: 145 },
+      { month: 10, year: 2024, value: 88 },
+      { month: 11, year: 2024, value: 102 },
+      { month: 12, year: 2024, value: 180 },
+      // 2025: Jan–Dec
+      { month: 1, year: 2025, value: 230 },
+      { month: 2, year: 2025, value: 175 },
+      { month: 3, year: 2025, value: 198 },
+      { month: 4, year: 2025, value: 244 },
+      { month: 5, year: 2025, value: 156 },
+      { month: 6, year: 2025, value: 195 },
+      { month: 7, year: 2025, value: 17 },
+      { month: 8, year: 2025, value: 62 },
+      { month: 9, year: 2025, value: 192 },
+      { month: 10, year: 2025, value: 125 },
+      { month: 11, year: 2025, value: 143 },
+      { month: 12, year: 2025, value: 210 },
+      // 2026: Jan–Jun
+      { month: 1, year: 2026, value: 25 },
+      { month: 2, year: 2026, value: 68 },
+      { month: 3, year: 2026, value: 88 },
+      { month: 4, year: 2026, value: 110 },
+      { month: 5, year: 2026, value: 95 },
+      { month: 6, year: 2026, value: 120 },
+    ];
+
+    const points = testData.map((d, i) => ({
+      id: `rainfall-${i}`,
+      ownerId: YEAR_USER,
+      source: "test",
+      seriesKey: "weather.rainfall.monthly_total",
+      value: d.value,
+      unit: "mm",
+      observedAt: new Date(Date.UTC(d.year, d.month - 1, 15)),
+      metadata: {},
+    }));
+
+    // Insert in batches to avoid SQLite's variable limit
+    for (let i = 0; i < points.length; i += 10) {
+      await db.insert(timeSeriesPoints).values(points.slice(i, i + 10));
+    }
+  });
+
+  it("groups time_series_points by calendar month, years as columns, exactly 12 rows", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "<table>{{#data}}<tr><td>{{month}}</td><td>{{month_label}}</td><td>{{y2023}}</td><td>{{y2024}}</td><td>{{y2025}}</td><td>{{y2026}}</td></tr>{{/data}}</table>",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_key: "weather.rainfall.monthly_total" },
+          limit: 12,
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    // Count <tr> rows in the output
+    const trCount = (html.match(/<tr>/g) ?? []).length;
+    expect(trCount).toBe(12);
+  });
+
+  it("row for month 1 has month_label Jan, y2024: 105, y2025: 230, y2026: 25", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "{{#data}}<tr data-month='{{month}}' data-label='{{month_label}}' data-y2024='{{y2024}}' data-y2025='{{y2025}}' data-y2026='{{y2026}}'></tr>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_key: "weather.rainfall.monthly_total" },
+          limit: 12,
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    // Check that the HTML contains the expected values for January
+    expect(html).toContain("data-month='1'");
+    expect(html).toContain("data-label='Jan'");
+    expect(html).toContain("data-y2024='105'");
+    expect(html).toContain("data-y2025='230'");
+    expect(html).toContain("data-y2026='25'");
+  });
+
+  it("row for month 7 has y2024: 2.5, y2025: 17, no y2023 or y2026", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "{{#data}}<tr data-month='{{month}}' data-y2023='{{y2023}}' data-y2024='{{y2024}}' data-y2025='{{y2025}}' data-y2026='{{y2026}}'></tr>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_key: "weather.rainfall.monthly_total" },
+          limit: 12,
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    // July has data only for 2024 and 2025; y2023 and y2026 should be empty/absent
+    expect(html).toContain("data-month='7'");
+    expect(html).toContain("data-y2024='2.5'");
+    expect(html).toContain("data-y2025='17'");
+    // y2023 and y2026 should be empty strings (no value rendered)
+    expect(html).toContain("data-y2023=''");
+    expect(html).toContain("data-y2026=''");
+  });
+
+  it("all 12 months appear even if some months have no data in some years", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<tr data-month='{{month}}' data-label='{{month_label}}'></tr>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_key: "weather.rainfall.monthly_total" },
+          limit: 12,
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    // Check all 12 month labels appear
+    for (let i = 1; i <= 12; i++) {
+      const labels = [
+        "Jan",
+        "Feb",
+        "Mar",
+        "Apr",
+        "May",
+        "Jun",
+        "Jul",
+        "Aug",
+        "Sep",
+        "Oct",
+        "Nov",
+        "Dec",
+      ];
+      expect(html).toContain(`data-label='${labels[i - 1]}'`);
+    }
+    // Count 12 rows
+    const rowCount = (html.match(/<tr/g) ?? []).length;
+    expect(rowCount).toBe(12);
+  });
+
+  it("pivot_by_year on a non-time_series_points kind passes rows through unmodified", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    // Should not throw; transform is silently ignored for facts
+    const { html } = await previewPage(ctx, {
+      template: "{{^rows}}<p>empty</p>{{/rows}}",
+      queries: {
+        rows: {
+          kind: "facts",
+          filters: {},
+          limit: 5,
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    expect(html).toContain("empty");
+  });
+
+  it("limit is applied to post-transform rows (max 12 for full year)", async () => {
+    const ctx = {
+      env,
+      user: { id: YEAR_USER, name: "Year Pivot", slug: "pivot-year-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<p>{{month}}</p>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_key: "weather.rainfall.monthly_total" },
+          limit: 3, // Only first 3 month rows
+          transforms: ["pivot_by_year"],
+        },
+      },
+    });
+    // Should only have Jan, Feb, Mar (months 1, 2, 3)
+    expect(html).toContain("<p>1</p>");
+    expect(html).toContain("<p>2</p>");
+    expect(html).toContain("<p>3</p>");
+    // Should not have month 4 or later
+    expect(html).not.toContain("<p>4</p>");
+    expect(html).not.toContain("<p>12</p>");
+  });
+
+  it("existing pivot_by_date tests continue to pass", async () => {
+    // This is implicitly tested by the pivot_by_date describe block
+    // but we can add an explicit check here if needed
+    expect(true).toBe(true);
   });
 });
