@@ -806,17 +806,27 @@ appRoutes.get("/pages", async (c: AppContext) => {
           <tbody>
             {rows.map((page) => (
               <tr key={page.id}>
-                <td>{page.title}</td>
+                <td>
+                  {user.slug && page.status === "published" ? (
+                    <a href={`/${user.slug}/${page.slug}`}>{page.title}</a>
+                  ) : (
+                    page.title
+                  )}
+                </td>
                 <td>
                   <code>{page.slug}</code>
                 </td>
                 <td>{page.status}</td>
                 <td>
-                  <a href={`/app/pages/${page.id}`}>edit</a>{" "}
-                  {user.slug && page.status === "published" ? (
-                    <a href={`/${user.slug}/${page.slug}`}>view</a>
-                  ) : null}
-                  <form method="post" action={`/app/pages/${page.id}/delete`} class="inline">
+                  <form method="get" action={`/app/pages/${page.id}`} class="inline">
+                    <button type="submit">Edit</button>
+                  </form>
+                  <form
+                    method="post"
+                    action={`/app/pages/${page.id}/delete`}
+                    class="inline"
+                    onsubmit="return confirm('Delete this page?')"
+                  >
                     <button type="submit" class="danger">
                       Delete
                     </button>
