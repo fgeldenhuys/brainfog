@@ -95,13 +95,13 @@ export const Layout: FC<{
         <style>{`
           * { margin: 0; padding: 0; box-sizing: border-box; }
           body { font-family: system-ui, sans-serif; background: #f5f5f5; }
-          header { background: white; border-bottom: 1px solid #ddd; display: flex; align-items: stretch; padding: 0; }
-          header .header-logo-wrap { align-self: stretch; flex-shrink: 0; overflow: hidden; }
+          header { background: white; border-bottom: 1px solid #ddd; display: flex; align-items: center; padding: 0; height: 5.5rem; }
+          header .header-logo-wrap { flex-shrink: 0; overflow: hidden; align-self: stretch; }
           header .header-logo-wrap img { display: block; height: 100%; width: auto; }
           header .header-content { padding: 1rem; display: flex; flex-direction: column; justify-content: center; gap: 0.5rem; }
           header h1 { font-size: 1.5rem; }
           header h1 a { color: inherit; text-decoration: none; }
-          nav { display: flex; gap: 0; border-top: 1px solid #eee; }
+          nav { display: flex; gap: 0; margin-left: auto; align-self: stretch; align-items: center; padding: 0 0.5rem; }
           main { max-width: 1200px; margin: 0 auto; padding: 2rem 1rem; }
           form { background: white; padding: 2rem; border-radius: 4px; max-width: 480px; }
           form.filters { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; max-width: none; padding: 1rem; margin-bottom: 1rem; }
@@ -161,17 +161,17 @@ export const Layout: FC<{
               </div>
             ) : null}
           </div>
+          {props.user ? (
+            <nav>
+              {navLink("/app", "Home", props.currentPath)}
+              {navLink("/app/browser", "Browser", props.currentPath)}
+              {navLink("/app/search", "Search", props.currentPath)}
+              {navLink("/app/metrics", "Metrics", props.currentPath)}
+              {navLink("/app/pages", "Pages", props.currentPath)}
+              {props.user.isAdmin ? navLink("/app/users", "Users", props.currentPath) : null}
+            </nav>
+          ) : null}
         </header>
-        {props.user ? (
-          <nav>
-            {navLink("/app", "Home", props.currentPath)}
-            {navLink("/app/browser", "Browser", props.currentPath)}
-            {navLink("/app/search", "Search", props.currentPath)}
-            {navLink("/app/metrics", "Metrics", props.currentPath)}
-            {navLink("/app/pages", "Pages", props.currentPath)}
-            {props.user.isAdmin ? navLink("/app/users", "Users", props.currentPath) : null}
-          </nav>
-        ) : null}
         <main>{props.children}</main>
       </body>
     </html>

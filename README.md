@@ -1,5 +1,7 @@
 # brainfog
 
+![brainfog](apps/worker/public/thinker.png)
+
 Brainfog is a shared memory and context layer for AI-assisted work: a remote MCP server plus a REST API and a minimal web UI, deployed on Cloudflare Workers with D1, Vectorize, and R2. Claude and the people working with it use brainfog to write and recall durable context across sessions and projects.
 
 ## Start Here
@@ -15,7 +17,7 @@ Brainfog is a shared memory and context layer for AI-assisted work: a remote MCP
 
 ### Memory model
 
-Seven first-class kinds, all owned per-user and sourced with provenance:
+Seven first-class kinds, all owned per-user:
 
 | Kind | Description |
 |---|---|
@@ -56,7 +58,7 @@ Dynamic, server-rendered pages with Mustache templates. Each page defines one or
 - `transforms`: `pivot_by_date` (groups `time_series_points` rows by calendar date, one row per date with series suffixes as fields), `count`
 - `display_formulas`: server-side computed fields using math expressions over row values
 
-**`pivot_by_date` transform**: Collapses multiple time-series per date into one row. Series suffix (text after the first dot in `seriesKey`) becomes a field name. Notes are merged across the group (first non-empty wins). Enables combined tables for multi-series data like electricity top-ups.
+**`pivot_by_date` transform**: Collapses multiple time-series per date into one row. Series suffix (text after the first dot in `seriesKey`) becomes a field name. Notes are merged across the group (first non-empty wins). Enables combined tables for multi-series data.
 
 Pages can be shared publicly via access links (random-token URLs, no auth required) or kept private.
 
