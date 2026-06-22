@@ -3,11 +3,16 @@
 // Runtime types generated with workerd@1.20260611.1 2026-06-12 nodejs_compat
 interface __BaseEnv_Env {
 	OAUTH_KV: KVNamespace;
+	D1_BACKUP_WORKFLOW: Workflow;
 	DOCUMENTS: R2Bucket;
+	D1_BACKUPS: R2Bucket;
 	DB: D1Database;
 	VECTORIZE: VectorizeIndex;
 	AI: Ai;
 	BRAINFOG_TOKEN_HASH_SECRET: string;
+	CLOUDFLARE_ACCOUNT_ID: string;
+	D1_DATABASE_ID: string;
+	D1_REST_API_TOKEN: string;
 	MCP_OBJECT: DurableObjectNamespace<import("./src/index").BrainfogMCP>;
 }
 declare namespace Cloudflare {
@@ -22,7 +27,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "BRAINFOG_TOKEN_HASH_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "BRAINFOG_TOKEN_HASH_SECRET" | "CLOUDFLARE_ACCOUNT_ID" | "D1_DATABASE_ID" | "D1_REST_API_TOKEN">> {}
 }
 
 // Begin runtime types

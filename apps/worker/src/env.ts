@@ -7,11 +7,16 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   AI: Ai;
   DOCUMENTS: R2Bucket;
+  D1_BACKUPS: R2Bucket;
+  D1_BACKUP_WORKFLOW: Workflow;
   MCP_OBJECT: DurableObjectNamespace<BrainfogMCP>;
   OAUTH_KV: KVNamespace;
   // Injected by OAuthProvider for requests it routes to defaultHandler/apiHandler;
   // not present when calling memory.ts service functions directly (e.g. in tests).
   OAUTH_PROVIDER?: OAuthHelpers;
   BRAINFOG_TOKEN_HASH_SECRET: string;
+  CLOUDFLARE_ACCOUNT_ID: string;
+  D1_DATABASE_ID: string;
+  D1_REST_API_TOKEN: string;
   TEST_MIGRATIONS?: D1Migration[];
 }

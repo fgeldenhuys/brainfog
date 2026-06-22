@@ -153,7 +153,9 @@ export const Layout: FC<{
             <img src="/thinker.png" alt="" />
           </div>
           <div class="header-content">
-            <h1><a href="/app">brainfog</a></h1>
+            <h1>
+              <a href="/app">brainfog</a>
+            </h1>
             {props.user ? (
               <div style={{ fontSize: "0.9rem", color: "#666" }}>
                 Signed in as <strong>{props.user.name}</strong>

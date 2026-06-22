@@ -2,6 +2,13 @@ import type { Context } from "hono";
 import { Hono } from "hono";
 import type { Env } from "../env";
 import {
+  createIngestionConnector,
+  listIngestionConnectors,
+  listIngestionRuns,
+  recordIngestionRun,
+  updateIngestionConnector,
+} from "../ingestion";
+import {
   addDocument,
   createDependency,
   createProject,
@@ -62,7 +69,7 @@ async function body(c: ApiContext) {
 
 function handle(error: unknown) {
   if (error instanceof MemoryError)
-    return { body: { error: error.message }, status: error.status as 400 | 401 | 404 };
+    return { body: { error: error.message }, status: error.status as 400 | 401 | 403 | 404 };
   return { body: { error: "internal_error" }, status: 500 as const };
 }
 
@@ -228,6 +235,27 @@ apiRoutes.post(
 apiRoutes.post(
   "/time-series-points",
   route(async (c) => c.json(await recordTimeSeriesPoint(ctx(c), await body(c)), 201)),
+);
+
+apiRoutes.get(
+  "/ingestion/connectors",
+  route(async (c) => c.json(await listIngestionConnectors(ctx(c)))),
+);
+apiRoutes.post(
+  "/ingestion/connectors",
+  route(async (c) => c.json(await createIngestionConnector(ctx(c), await body(c)), 201)),
+);
+apiRoutes.patch(
+  "/ingestion/connectors/:id",
+  route(async (c) => c.json(await updateIngestionConnector(ctx(c), param(c, "id"), await body(c)))),
+);
+apiRoutes.get(
+  "/ingestion/connectors/:id/runs",
+  route(async (c) => c.json(await listIngestionRuns(ctx(c), param(c, "id")))),
+);
+apiRoutes.post(
+  "/ingestion/connectors/:id/runs",
+  route(async (c) => c.json(await recordIngestionRun(ctx(c), param(c, "id"), await body(c)), 201)),
 );
 
 apiRoutes.get(

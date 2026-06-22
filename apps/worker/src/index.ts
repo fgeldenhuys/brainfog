@@ -9,6 +9,8 @@ import { apiRoutes } from "./routes/api";
 import { uiApiRoutes } from "./routes/ui-api";
 import { uiRoutes } from "./ui";
 
+export { D1BackupWorkflow } from "./d1-backup-workflow";
+
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
 app.route("/api/v1", apiRoutes);

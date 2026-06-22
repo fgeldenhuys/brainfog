@@ -4,3 +4,9 @@
 
 # Secret used to hash per-user bearer tokens before storing them in D1 (ADR-004).
 BRAINFOG_TOKEN_HASH_SECRET=
+
+# Weekly D1 SQL backups use the Cloudflare D1 REST export API from a Workflow.
+# Production D1_REST_API_TOKEN must be configured with Wrangler secrets.
+CLOUDFLARE_ACCOUNT_ID=
+D1_DATABASE_ID=
+D1_REST_API_TOKEN=

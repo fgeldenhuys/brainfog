@@ -24,6 +24,7 @@ export type MemoryUser = {
   isAdmin?: boolean;
 };
 type Ctx = { env: Env; user: MemoryUser; source?: string };
+export type MemoryCtx = Ctx;
 
 const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
 const model = "@cf/qwen/qwen3-embedding-0.6b";
@@ -39,6 +40,9 @@ const suffix = {
   dependencyEdge: "e",
   page: "g",
   pageAccessLink: "a",
+  ingestionConnector: "n",
+  ingestionRun: "u",
+  ingestionIdempotencyKey: "i",
 } as const;
 
 export const graphKinds = [
@@ -80,7 +84,7 @@ export function createId(kind: keyof typeof suffix) {
 }
 
 export const isBrainfogId = (value: string, typeSuffix?: string) =>
-  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteunga]"}$`).test(value);
+  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteungai]"}$`).test(value);
 
 function now() {
   return new Date();
@@ -2004,10 +2008,7 @@ export async function recordTimeSeriesPoints(
     throw new MemoryError(400, "points must be an array");
   }
 
-  // Validate all rows up front: project existence if supplied
-  for (const point of points) {
-    await ensureProject(ctx, point.project_id as string | undefined);
-  }
+  await validateTimeSeriesPointsInput(ctx, points);
 
   // Build rows and ensure no partial inserts
   const rows = points.map((point) => ({
@@ -2031,6 +2032,16 @@ export async function recordTimeSeriesPoints(
 
   // Return the inserted rows
   return rows;
+}
+
+export async function validateTimeSeriesPointsInput(
+  ctx: Ctx,
+  points: Array<Record<string, unknown>>,
+) {
+  for (const point of points) {
+    await ensureProject(ctx, point.project_id as string | undefined);
+    asDate(point.observed_at);
+  }
 }
 
 export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unknown>) {

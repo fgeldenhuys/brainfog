@@ -5,6 +5,13 @@
 # Secret used to hash per-user bearer tokens before storing them in D1 (ADR-004).
 BRAINFOG_TOKEN_HASH_SECRET=
 
+# Weekly D1 SQL backups use the Cloudflare D1 REST export API from a Workflow.
+# Set D1_REST_API_TOKEN with `wrangler secret put D1_REST_API_TOKEN` in production;
+# do not commit a real token. Account/database ids are non-secret config placeholders.
+CLOUDFLARE_ACCOUNT_ID=
+D1_DATABASE_ID=
+D1_REST_API_TOKEN=
+
 # OAuth 2.1 grant and token storage uses the OAUTH_KV KV namespace binding
 # configured in wrangler.jsonc (ADR-012). No .dev.vars entry is needed;
 # the binding is automatically available in both local and production environments.

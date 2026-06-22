@@ -288,6 +288,112 @@ export const timeSeriesPoints = sqliteTable(
   ],
 );
 
+export const ingestionConnectors = sqliteTable(
+  "ingestion_connectors",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    projectId: text("project_id").references(() => projects.id),
+    source: text("source").notNull(),
+    type: text("type").notNull(),
+    name: text("name").notNull(),
+    status: text("status").notNull().default("active"),
+    config: text("config", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'`),
+    schedule: text("schedule", { mode: "json" })
+      .$type<Record<string, unknown> | null>()
+      .default(sql`NULL`),
+    cursor: text("cursor", { mode: "json" })
+      .$type<Record<string, unknown> | null>()
+      .default(sql`NULL`),
+    lastRunAt: integer("last_run_at", { mode: "timestamp" }),
+    lastSuccessAt: integer("last_success_at", { mode: "timestamp" }),
+    lastError: text("last_error"),
+    ...timestamps,
+  },
+  (table) => [
+    check(
+      "ingestion_connectors_status_check",
+      sql`${table.status} in ('active','paused','disabled')`,
+    ),
+    index("ingestion_connectors_owner_status_idx").on(table.ownerId, table.status),
+    index("ingestion_connectors_owner_type_idx").on(table.ownerId, table.type),
+    index("ingestion_connectors_owner_project_idx").on(table.ownerId, table.projectId),
+  ],
+);
+
+export const ingestionRuns = sqliteTable(
+  "ingestion_runs",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    connectorId: text("connector_id")
+      .notNull()
+      .references(() => ingestionConnectors.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    trigger: text("trigger").notNull(),
+    status: text("status").notNull(),
+    startedAt: integer("started_at", { mode: "timestamp" }).notNull(),
+    finishedAt: integer("finished_at", { mode: "timestamp" }),
+    cursorBefore: text("cursor_before", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    cursorAfter: text("cursor_after", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    insertedCount: integer("inserted_count").notNull().default(0),
+    skippedCount: integer("skipped_count").notNull().default(0),
+    failedCount: integer("failed_count").notNull().default(0),
+    error: text("error", { mode: "json" }).$type<Record<string, unknown> | null>(),
+    metadata: text("metadata", { mode: "json" })
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default(sql`'{}'`),
+    ...timestamps,
+  },
+  (table) => [
+    check("ingestion_runs_trigger_check", sql`${table.trigger} in ('manual','scheduled','bridge')`),
+    check("ingestion_runs_status_check", sql`${table.status} in ('running','succeeded','failed')`),
+    index("ingestion_runs_owner_connector_idx").on(table.ownerId, table.connectorId),
+    index("ingestion_runs_owner_started_idx").on(table.ownerId, table.startedAt),
+  ],
+);
+
+export const ingestionIdempotencyKeys = sqliteTable(
+  "ingestion_idempotency_keys",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    connectorId: text("connector_id")
+      .notNull()
+      .references(() => ingestionConnectors.id, { onDelete: "cascade" }),
+    sourceItemId: text("source_item_id").notNull(),
+    seriesKey: text("series_key").notNull(),
+    observedAt: integer("observed_at", { mode: "timestamp" }).notNull(),
+    timeSeriesPointId: text("time_series_point_id").references(() => timeSeriesPoints.id, {
+      onDelete: "cascade",
+    }),
+    runId: text("run_id")
+      .notNull()
+      .references(() => ingestionRuns.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  },
+  (table) => [
+    unique("ingestion_idempotency_unique").on(
+      table.ownerId,
+      table.connectorId,
+      table.sourceItemId,
+      table.seriesKey,
+      table.observedAt,
+    ),
+    index("ingestion_idempotency_connector_idx").on(table.ownerId, table.connectorId),
+  ],
+);
+
 export const dependencyEdges = sqliteTable(
   "dependency_edges",
   {

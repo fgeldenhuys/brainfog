@@ -8,6 +8,10 @@
     "directory": "public"
   },
 
+  "vars": {
+    "D1_DATABASE_ID": "4627ecde-2253-47a6-be90-bb310d937c25"
+  },
+
   "d1_databases": [
     {
       "binding": "DB",
@@ -32,6 +36,19 @@
     {
       "binding": "DOCUMENTS",
       "bucket_name": "brainfog-documents"
+    },
+    {
+      "binding": "D1_BACKUPS",
+      "bucket_name": "brainfog-d1-backups"
+    }
+  ],
+
+  "workflows": [
+    {
+      "binding": "D1_BACKUP_WORKFLOW",
+      "name": "brainfog-weekly-d1-backup",
+      "class_name": "D1BackupWorkflow",
+      "schedules": ["0 2 * * SUN"]
     }
   ],
 
