@@ -43,6 +43,7 @@ const suffix = {
   ingestionConnector: "n",
   ingestionRun: "u",
   ingestionIdempotencyKey: "i",
+  ingestionConnectorCredential: "v",
 } as const;
 
 export const graphKinds = [
@@ -84,7 +85,7 @@ export function createId(kind: keyof typeof suffix) {
 }
 
 export const isBrainfogId = (value: string, typeSuffix?: string) =>
-  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteungai]"}$`).test(value);
+  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteungiav]"}$`).test(value);
 
 function now() {
   return new Date();

@@ -43,6 +43,34 @@
       "when": 1781731200000,
       "tag": "0005_global_people_pool",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1781817600000,
+      "tag": "0006_shared_visibility",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1781904000000,
+      "tag": "0007_user_pages",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1781990400000,
+      "tag": "0008_ingestion_framework",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1782076800000,
+      "tag": "0009_connector_credentials",
+      "breakpoints": true
     }
   ]
 }

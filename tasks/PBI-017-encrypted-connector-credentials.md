@@ -108,11 +108,35 @@ Full key rotation is out of scope. The table should include a key-version field 
 
 ## Close-Out Checklist
 
-- [ ] Credential table and migration added.
-- [ ] Encryption/decryption helper implemented with WebCrypto.
-- [ ] Authenticated owner-scoped credential routes added.
-- [ ] Redacted response shapes implemented.
-- [ ] Secret placeholders documented without real values.
-- [ ] Tests prove encrypted-at-rest and no plaintext echo.
-- [ ] `specs/ingestion/spec.md` DoD items for credentials updated with completion evidence.
-- [ ] `pnpm check && pnpm typecheck && pnpm test` pass.
+- [x] Credential table and migration added.
+- [x] Encryption/decryption helper implemented with WebCrypto.
+- [x] Authenticated owner-scoped credential routes added.
+- [x] Redacted response shapes implemented.
+- [x] Secret placeholders documented without real values.
+- [x] Tests prove encrypted-at-rest and no plaintext echo.
+- [x] `specs/ingestion/spec.md` DoD items for credentials updated with completion evidence.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass.
+
+## Completion Evidence
+
+- `apps/worker/src/env.ts` — added optional `BRAINFOG_CONNECTOR_ENCRYPTION_KEY` to `Env` interface so credential routes can fail closed when it is absent.
+- `.dev.vars.example` — added placeholder documentation for the encryption key.
+- `packages/db/src/schema.ts` — added `ingestionConnectorCredentials` Drizzle table with all required columns, check constraint, indexes, and unique constraint.
+- `apps/worker/src/memory.ts` — added `ingestionConnectorCredential: "v"` suffix and `v` to the `isBrainfogId` regex.
+- `packages/db/migrations/0009_connector_credentials.sql` — D1 migration for the credentials table.
+- `packages/db/migrations/meta/_journal.json` — added entries for migrations 0006-0009.
+- `apps/worker/src/crypto.ts` — WebCrypto AES-256-GCM `encryptCredentials`/`decryptCredentials` helpers with key validation and fail-closed error handling.
+- `apps/worker/src/credentials.ts` — `createOrReplaceConnectorCredentials`, `getCredentialStatus`, `deleteConnectorCredentials`, and `decryptConnectorCredentials` service functions with owner-scoped access, redacted summary generation, and encrypted-at-rest storage.
+- `apps/worker/src/routes/api.ts` — added `PUT`, `GET`, and `DELETE` routes at `/api/v1/ingestion/connectors/:id/credentials` behind existing auth middleware.
+- `apps/worker/test/ingestion-credentials.test.ts` — 8 tests covering ciphertext storage, safe GET, credential replacement, revoke/delete, cross-user isolation, encryption key failure modes, redacted summary generation, and short-secret no-echo behavior.
+- `apps/worker/vitest.config.ts` — added test-only `BRAINFOG_CONNECTOR_ENCRYPTION_KEY` binding.
+- `specs/ingestion/spec.md` — marked credential DoD items [x] with evidence.
+
+## Ship-PBI Log
+
+- **Iteration 1 (implementor):** Added encrypted connector credentials: D1 schema/migration `0009_connector_credentials.sql`, WebCrypto AES-256-GCM crypto helpers in `apps/worker/src/crypto.ts`, credential service functions in `apps/worker/src/credentials.ts`, authenticated `PUT/GET/DELETE` routes at `/api/v1/ingestion/connectors/:id/credentials`, redacted response shapes, owner-isolated access, and 8 credential tests. Updated `env.ts`, `.dev.vars.example`, `memory.ts` (suffix `v`), `vitest.config.ts` (test key binding), and `specs/ingestion/spec.md` DoD.
+- **Deterministic gates:** `pnpm check` ✓, `pnpm typecheck` ✓, `pnpm test` (222 tests, 11 files) ✓, `pnpm build` ✓.
+- **Critic pass 1:** Found two blockers: short token/password values could be echoed in redacted summaries, and the spec overclaimed broader Garmin-related test completion.
+- **Fix pass:** Changed short token/password redaction to `"***"`, added regression coverage for short passwords, and changed the broad Garmin-related tests DoD back to incomplete with PBI-017 evidence marked partial.
+- **Deterministic gates after fix:** `pnpm check` ✓, `pnpm typecheck` ✓, `pnpm test` (222 tests, 11 files) ✓.
+- **Critic verification:** ✓ No remaining PBI-017 blockers.

@@ -1,5 +1,10 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
+import {
+  createOrReplaceConnectorCredentials,
+  deleteConnectorCredentials,
+  getCredentialStatus,
+} from "../credentials";
 import type { Env } from "../env";
 import {
   createIngestionConnector,
@@ -256,6 +261,30 @@ apiRoutes.get(
 apiRoutes.post(
   "/ingestion/connectors/:id/runs",
   route(async (c) => c.json(await recordIngestionRun(ctx(c), param(c, "id"), await body(c)), 201)),
+);
+
+apiRoutes.put(
+  "/ingestion/connectors/:id/credentials",
+  route(async (c) => {
+    const payload = await body(c);
+    return c.json(
+      await createOrReplaceConnectorCredentials(ctx(c), param(c, "id"), {
+        auth_type: payload.auth_type as string | undefined,
+        payload: (payload.payload as Record<string, unknown>) ?? {},
+        status: payload.status as string | undefined,
+        expires_at: payload.expires_at as number | undefined,
+      }),
+      200,
+    );
+  }),
+);
+apiRoutes.get(
+  "/ingestion/connectors/:id/credentials",
+  route(async (c) => c.json(await getCredentialStatus(ctx(c), param(c, "id")))),
+);
+apiRoutes.delete(
+  "/ingestion/connectors/:id/credentials",
+  route(async (c) => c.json(await deleteConnectorCredentials(ctx(c), param(c, "id")))),
 );
 
 apiRoutes.get(

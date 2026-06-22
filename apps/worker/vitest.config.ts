@@ -12,6 +12,8 @@ export default defineConfig({
       miniflare: {
         bindings: {
           TEST_MIGRATIONS: await readD1Migrations("../../packages/db/migrations"),
+          // Test-only encryption key for connector credential tests (32 random bytes, base64)
+          BRAINFOG_CONNECTOR_ENCRYPTION_KEY: "YnJhaW5mb2d0ZXN0LTMyYnl0ZS1rZXktMTIzNDU2Nzg=",
         },
       },
     })),

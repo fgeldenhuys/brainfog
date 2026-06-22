@@ -67,7 +67,7 @@ async function ensureProject(ctx: MemoryCtx, id?: string | null) {
   if (!row) throw new MemoryError(404, "project not found");
 }
 
-async function getConnector(ctx: MemoryCtx, id: string) {
+export async function getConnector(ctx: MemoryCtx, id: string) {
   const connector = (
     await createDb(ctx.env.DB)
       .select()

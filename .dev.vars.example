@@ -10,3 +10,6 @@ BRAINFOG_TOKEN_HASH_SECRET=
 CLOUDFLARE_ACCOUNT_ID=
 D1_DATABASE_ID=
 D1_REST_API_TOKEN=
+
+# AES-256-GCM key (base64-encoded, 32 bytes) for encrypting connector credentials at rest. Generate with: openssl rand -base64 32
+BRAINFOG_CONNECTOR_ENCRYPTION_KEY=

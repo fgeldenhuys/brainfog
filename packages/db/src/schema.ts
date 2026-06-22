@@ -394,6 +394,47 @@ export const ingestionIdempotencyKeys = sqliteTable(
   ],
 );
 
+export const ingestionConnectorCredentials = sqliteTable(
+  "ingestion_connector_credentials",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    connectorId: text("connector_id")
+      .notNull()
+      .references(() => ingestionConnectors.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    authType: text("auth_type").notNull(),
+    status: text("status").notNull().default("valid"),
+    encryptedPayload: text("encrypted_payload").notNull(),
+    encryptionMetadata: text("encryption_metadata", { mode: "json" })
+      .$type<{ algorithm: string; iv: string; keyVersion: number }>()
+      .notNull()
+      .default(sql`'{}'`),
+    redactedSummary: text("redacted_summary", { mode: "json" })
+      .$type<{ username?: string; token_prefix?: string; domain?: string }>()
+      .notNull()
+      .default(sql`'{}'`),
+    expiresAt: integer("expires_at", { mode: "timestamp" }),
+    lastVerifiedAt: integer("last_verified_at", { mode: "timestamp" }),
+    shared: integer("shared", { mode: "boolean" }).notNull().default(false),
+    ...timestamps,
+  },
+  (table) => [
+    check(
+      "ingestion_connector_credentials_status_check",
+      sql`${table.status} in ('missing','valid','needs_setup','mfa_required','expired','revoked','error')`,
+    ),
+    unique("ingestion_connector_credentials_owner_connector_unique").on(
+      table.ownerId,
+      table.connectorId,
+    ),
+    index("ingestion_connector_credentials_owner_status_idx").on(table.ownerId, table.status),
+    index("ingestion_connector_credentials_connector_idx").on(table.ownerId, table.connectorId),
+  ],
+);
+
 export const dependencyEdges = sqliteTable(
   "dependency_edges",
   {

@@ -18,5 +18,6 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID: string;
   D1_DATABASE_ID: string;
   D1_REST_API_TOKEN: string;
+  BRAINFOG_CONNECTOR_ENCRYPTION_KEY?: string;
   TEST_MIGRATIONS?: D1Migration[];
 }
