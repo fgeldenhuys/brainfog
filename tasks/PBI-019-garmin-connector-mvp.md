@@ -23,6 +23,10 @@ Implement the Garmin connector MVP on top of the ingestion framework, encrypted 
 - PBI-018 Garmin Cloudflare egress spike must produce a `proceed` or `proceed_with_risks` recommendation before this PBI starts.
 - If PBI-018 proves Cloudflare Containers are required, this PBI may add the approved Container binding/runtime for the Garmin runner.
 
+### PBI-018 Handoff
+
+PBI-018 closed with `proceed_with_risks`: Cloudflare Container egress, `python-garminconnect`, login, one recent activity-list call, and today's daily summary call all succeeded from the deployed Worker. During this PBI, either promote/refactor the spike-only container and `/api/v1/ingestion/spikes/garmin` admin route into the production Garmin runner, or replace them and remove the spike-only route before close-out.
+
 ## Context
 
 ### Why This Work
@@ -183,7 +187,7 @@ Tests do not need to call live Garmin or create production facts, but the PBI sh
 ### Runner Verification
 
 - Provide a runner dry-run mode that returns/prints a bounded payload without writing time-series rows, or document an equivalent command.
-- If live Garmin credentials are available during implementation, perform one Cloudflare-hosted runner run for one connector and verify brainfog records activity and daily metrics. If not, document the exact follow-up command and test only with fixtures.
+- Before closing this PBI, perform one Cloudflare-hosted runner run using a real Garmin account for one connector and verify brainfog records both activity and daily metrics. Do not close PBI-019 with fixture-only evidence unless live Garmin access is explicitly unavailable and a follow-up PBI is opened.
 - No live Garmin payload fixtures containing personal data are committed.
 
 ## Refinement Protocol

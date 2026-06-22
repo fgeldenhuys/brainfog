@@ -52,11 +52,23 @@
     }
   ],
 
+  "containers": [
+    {
+      "class_name": "GarminSpikeContainer",
+      "image": "./containers/garmin-spike/Dockerfile",
+      "max_instances": 1
+    }
+  ],
+
   "durable_objects": {
     "bindings": [
       {
         "name": "MCP_OBJECT",
         "class_name": "BrainfogMCP"
+      },
+      {
+        "name": "GARMIN_SPIKE_CONTAINER",
+        "class_name": "GarminSpikeContainer"
       }
     ]
   },
@@ -73,6 +85,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["BrainfogMCP"]
+    },
+    {
+      "tag": "v2-garmin-spike-container",
+      "new_sqlite_classes": ["GarminSpikeContainer"]
     }
   ]
 }

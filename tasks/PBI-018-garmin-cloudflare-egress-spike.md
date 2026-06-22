@@ -1,5 +1,7 @@
 # PBI-018: Garmin Cloudflare Egress Spike
 
+**Status:** Closed
+
 ## Directive
 
 Before implementing the full Garmin connector, run a small Cloudflare-hosted spike to determine whether Garmin Connect login/API access is feasible from Cloudflare egress using `python-garminconnect` or an equivalent minimal probe.
@@ -84,9 +86,15 @@ Add a short note under `docs/notes/` or append a `## Spike Evidence` section to 
 
 ## Close-Out Checklist
 
-- [ ] Cloudflare-hosted Garmin feasibility probe implemented or blocker documented.
-- [ ] Sanitized spike evidence recorded.
-- [ ] Recommendation for PBI-017 recorded.
-- [ ] No Garmin secrets or personal payloads committed.
-- [ ] `specs/ingestion/spec.md` DoD item for the spike updated with completion evidence.
-- [ ] Required gates pass for any committed code/config.
+- [x] Cloudflare-hosted Garmin feasibility probe implemented or blocker documented.
+- [x] Sanitized spike evidence recorded.
+- [x] Recommendation for PBI-017 recorded.
+- [x] No Garmin secrets or personal payloads committed.
+- [x] `specs/ingestion/spec.md` DoD item for the spike updated with completion evidence.
+- [x] Required gates pass for any committed code/config.
+
+## Closed Outcome
+
+- Result: `proceed_with_risks`.
+- Evidence: `docs/notes/garmin-cloudflare-egress-spike.md` records the sanitized hosted result.
+- Handoff: PBI-019 must either promote/refactor the spike container and admin route into the production Garmin runner, or replace them and remove the spike-only route before closing the Garmin MVP.

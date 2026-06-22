@@ -1,3 +1,4 @@
+import { getContainer } from "@cloudflare/containers";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import {
@@ -92,6 +93,46 @@ const param = (c: ApiContext, name: string) => {
   if (!value) throw new MemoryError(400, `missing ${name}`);
   return value;
 };
+
+const GARMIN_SPIKE_TIMEOUT_MS = 90_000;
+
+async function runGarminSpike(c: ApiContext) {
+  const payload = await body(c);
+  const email = String(payload.email ?? "").trim();
+  const password = String(payload.password ?? "");
+  const mfaCode =
+    payload.mfa_code === undefined ? undefined : String(payload.mfa_code ?? "").trim();
+
+  if (!c.get("user").isAdmin) throw new MemoryError(403, "admin_required");
+  if (!email || !password) throw new MemoryError(400, "missing Garmin email or password");
+  if (!c.env.GARMIN_SPIKE_CONTAINER) throw new MemoryError(500, "garmin_spike_container_missing");
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), GARMIN_SPIKE_TIMEOUT_MS);
+  try {
+    const container = getContainer(c.env.GARMIN_SPIKE_CONTAINER, `user-${c.get("user").id}`);
+    const response = await container.fetch("https://garmin-spike.local/probe", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, password, mfa_code: mfaCode }),
+      signal: controller.signal,
+    });
+    const result = (await response.json().catch(() => ({ category: "container_error" }))) as Record<
+      string,
+      unknown
+    >;
+    return c.json(result, response.ok ? 200 : 502, {
+      "cache-control": "no-store",
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new MemoryError(504, "garmin_spike_timeout");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 apiRoutes.patch(
   "/whoami",
@@ -286,6 +327,8 @@ apiRoutes.delete(
   "/ingestion/connectors/:id/credentials",
   route(async (c) => c.json(await deleteConnectorCredentials(ctx(c), param(c, "id")))),
 );
+
+apiRoutes.post("/ingestion/spikes/garmin", route(runGarminSpike));
 
 apiRoutes.get(
   "/dependencies",

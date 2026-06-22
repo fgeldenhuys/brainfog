@@ -23,6 +23,9 @@ importers:
       '@brainfog/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@cloudflare/containers':
+        specifier: ^0.3.7
+        version: 0.3.7
       '@cloudflare/workers-oauth-provider':
         specifier: ^0.8.0
         version: 0.8.0
@@ -314,6 +317,9 @@ packages:
         optional: true
       zod:
         optional: true
+
+  '@cloudflare/containers@0.3.7':
+    resolution: {integrity: sha512-DM9dm3FnIBSyiSJ1FLavKwl/lk3oAmTaynCzZQ9pZR0ncRPquSxkxd8Nu2MFILxmDDsPkxKsSNEh9mHHMty4Fw==}
 
   '@cloudflare/kv-asset-handler@0.5.0':
     resolution: {integrity: sha512-jxQYkj8dSIzc0cD6cMMNdOc1UVjqSqu8BZdor5s8cGjW2I8BjODt/kWPVdY+u9zj3ms75Q5qaZgnxUad83+eAg==}
@@ -3047,6 +3053,8 @@ snapshots:
       '@modelcontextprotocol/sdk': 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
       ai: 6.0.203(zod@4.4.3)
       zod: 4.4.3
+
+  '@cloudflare/containers@0.3.7': {}
 
   '@cloudflare/kv-asset-handler@0.5.0': {}
 
