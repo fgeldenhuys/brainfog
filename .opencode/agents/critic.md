@@ -1,6 +1,7 @@
 ---
 description: Use for reviewing diffs, specs, and ADRs against brainfog's invariants (ARCHITECTURE.md), the active spec's Contract, and security/provenance requirements before work is considered done.
 mode: subagent
+model: openai/gpt-5.5
 ---
 
 # Critic

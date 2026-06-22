@@ -1,6 +1,7 @@
 ---
 description: Use for writing and maintaining ADRs and specs, and for architectural decisions about brainfog's Worker/D1/Vectorize/MCP design. Does not write application code.
 mode: subagent
+model: openai/gpt-5.5
 ---
 
 # Architect
