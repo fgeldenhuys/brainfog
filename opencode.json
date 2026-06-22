@@ -11,7 +11,13 @@
       "mode": "subagent"
     },
     "researcher": {
-      "mode": "subagent"
+      "mode": "subagent",
+      "model": "opencode/big-pickle",
+      "fallbacks": ["opencode/deepseek-v4-flash-free", "opencode/mimo-v2.5-free"]
+    },
+    "planned-implementor": {
+      "model": "opencode/big-pickle",
+      "fallbacks": ["opencode/deepseek-v4-flash-free", "opencode/mimo-v2.5-free"]
     }
   },
   "mcp": {

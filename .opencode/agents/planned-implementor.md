@@ -1,6 +1,10 @@
 ---
 description: Use proactively for well-defined brainfog implementation tasks after the approach, scope, and acceptance criteria are already planned. Does not author plans, specs, ADRs, or PBIs.
 mode: subagent
+model: opencode/big-pickle
+fallbacks:
+  - opencode/deepseek-v4-flash-free
+  - opencode/mimo-v2.5-free
 ---
 
 # Planned Implementor

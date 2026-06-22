@@ -1,6 +1,10 @@
 ---
 description: Use for fast, narrowly-scoped factual lookups — Cloudflare API/SDK behavior, MCP protocol details, library capabilities — to unblock the architect or implementor without derailing their context.
 mode: subagent
+model: opencode/big-pickle
+fallbacks:
+  - opencode/deepseek-v4-flash-free
+  - opencode/mimo-v2.5-free
 ---
 
 # Researcher
