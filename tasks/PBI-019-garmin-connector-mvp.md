@@ -200,12 +200,29 @@ Tests do not need to call live Garmin or create production facts, but the PBI sh
 
 ## Close-Out Checklist
 
-- [ ] Garmin connector type and Cloudflare-hosted runner implemented.
-- [ ] Multi-user scheduled dispatch runs once per active Garmin connector with isolated credentials.
-- [ ] Daily summary and activity payload validation implemented.
-- [ ] `garmin.daily.*` and `garmin.activities.*` normalization implemented.
-- [ ] Activity and daily idempotency tested.
-- [ ] Runner dry-run/manual-run path documented without committed secrets.
-- [ ] Garmin namespace convention documented for setup.
-- [ ] `specs/ingestion/spec.md` DoD items for Garmin are updated with completion evidence.
-- [ ] `pnpm check && pnpm typecheck && pnpm test` pass.
+- [x] Garmin connector type and Cloudflare-hosted runner implemented.
+- [x] Multi-user scheduled dispatch runs once per active Garmin connector with isolated credentials.
+- [x] Daily summary and activity payload validation implemented.
+- [x] `garmin.daily.*` and `garmin.activities.*` normalization implemented.
+- [x] Activity and daily idempotency tested.
+- [x] Runner dry-run/manual-run path documented without committed secrets.
+- [x] Garmin namespace convention documented for setup.
+- [x] `specs/ingestion/spec.md` DoD items for Garmin are updated with implementation/test evidence that does not claim a live promoted-runner verification.
+- [ ] Live Cloudflare-hosted promoted Garmin runner run with a real Garmin account verifies both daily and activity metrics in brainfog. Not completed during critic follow-up; opened PBI-020 because live Garmin access was unavailable.
+- [x] `pnpm check && pnpm typecheck && pnpm test` pass after critic follow-up fixes; `pnpm build` also passes because Worker/container code changed. Evidence: reran both commands successfully during critic follow-up; Vitest reported 227 passing tests, and Wrangler dry-run rebuilt the Garmin container image.
+
+## Critic Follow-Up Notes
+
+- Restored Garmin runner and Worker-side error scrubbing for username/email/password/token/session/cookie values before returning or persisting runner failures.
+- Bounded the Python runner cursor window to 31 days before Garmin calls and filters activities to the requested cursor window while keeping returned activities capped at 100.
+- Scheduled Garmin dispatch now isolates each connector in its own failure boundary, continues subsequent connectors, and records sanitized failed `ingestion_runs` rows for failures before successful payload recording.
+- Refreshed credential/session updates are constrained to documented credential/session fields before encrypted storage.
+- Live promoted-runner verification remains explicitly incomplete and is tracked by `tasks/PBI-020-garmin-live-runner-verification.md`.
+
+## Ship-PBI Log
+
+- **Iteration 1 (implementor):** Added the production Garmin connector path: Cloudflare Container runner, bounded runner payload validation, authenticated owner-scoped `POST /api/v1/ingestion/connectors/:id/garmin-runs`, scheduled Garmin dispatch, daily/activity normalization into `garmin.daily.*` and `garmin.activities.*`, idempotent ingestion through the existing ingestion service, tests, docs, and spec/PBI evidence updates. Removed the PBI-018 spike-only route/container. Initial direct gates passed: `pnpm check && pnpm typecheck && pnpm test && pnpm build` with 226 tests.
+- **Critic pass 1:** Found four blocking issues: Garmin runner/Worker errors could leak secrets, the Python runner accepted unbounded date windows and ignored activity cursor filtering, scheduled dispatch was not failure-isolated and did not record failed runs before payload ingestion, and closeout/spec/docs overclaimed live Garmin verification without a real promoted-runner run or follow-up PBI.
+- **Iteration 2 (fix pass):** Added runner and Worker-side secret scrubbing, runner-side 31-day date bounding and cursor-aware activity filtering, per-connector scheduled failure isolation with sanitized failed run rows, constrained refreshed credential/session updates, and regression coverage for scheduled failure isolation plus secret redaction. Updated docs/spec/PBI to avoid live-verification overclaiming and opened `tasks/PBI-020-garmin-live-runner-verification.md` because live Garmin access was unavailable.
+- **Deterministic gates after fix:** An initial rerun hit Cloudflare Vitest pool startup/termination timeouts caused by a stale orphaned `workerd`; after terminating that process, `pnpm check && pnpm typecheck && pnpm test && pnpm build` passed with 227 tests and a successful Wrangler dry-run/container image build.
+- **Critic pass 2:** Passed with no blocking findings. Critic confirmed the four prior blockers were addressed, no scope drift or brainfog invariant violations were found, and PBI-020 is an acceptable follow-up for unavailable live Garmin verification.

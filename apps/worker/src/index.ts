@@ -2,6 +2,7 @@ import { OAuthProvider } from "@cloudflare/workers-oauth-provider";
 import { Hono } from "hono";
 import { lookupAuthenticatedUser, recordTokenUsage } from "./auth-lookup";
 import type { Env } from "./env";
+import { dispatchScheduledGarminRuns } from "./garmin";
 import { BrainfogMCP } from "./mcp";
 import type { AuthVariables } from "./middleware/auth";
 import { handleAuthorizeGet, handleAuthorizePost } from "./oauth";
@@ -10,7 +11,7 @@ import { uiApiRoutes } from "./routes/ui-api";
 import { uiRoutes } from "./ui";
 
 export { D1BackupWorkflow } from "./d1-backup-workflow";
-export { GarminSpikeContainer } from "./garmin-spike-container";
+export { GarminContainer } from "./garmin-container";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
@@ -32,7 +33,7 @@ app.route("/", uiRoutes);
 const mcpHandler = BrainfogMCP.serve("/mcp").fetch;
 
 // Export OAuthProvider as the default Worker handler, wrapping the Hono app
-export default new OAuthProvider({
+const provider = new OAuthProvider({
   apiRoute: "/mcp",
   apiHandler: {
     fetch: async (request, env, ctx) => {
@@ -66,5 +67,12 @@ export default new OAuthProvider({
     };
   },
 });
+
+export default {
+  fetch: provider.fetch.bind(provider),
+  scheduled: async (_controller: ScheduledController, env: Env) => {
+    await dispatchScheduledGarminRuns({ env });
+  },
+};
 
 export { BrainfogMCP };

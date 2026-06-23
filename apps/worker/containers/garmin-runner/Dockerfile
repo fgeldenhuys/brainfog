@@ -8,8 +8,8 @@ WORKDIR /app
 
 RUN pip install --no-cache-dir garminconnect curl_cffi
 
-COPY probe_server.py /app/probe_server.py
+COPY runner_server.py /app/runner_server.py
 
 EXPOSE 8080
 
-CMD ["python", "/app/probe_server.py"]
+CMD ["python", "/app/runner_server.py"]

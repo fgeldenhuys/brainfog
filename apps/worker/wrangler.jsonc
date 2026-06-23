@@ -8,6 +8,10 @@
     "directory": "public"
   },
 
+  "triggers": {
+    "crons": ["15 */6 * * *"]
+  },
+
   "vars": {
     "D1_DATABASE_ID": "4627ecde-2253-47a6-be90-bb310d937c25"
   },
@@ -54,8 +58,8 @@
 
   "containers": [
     {
-      "class_name": "GarminSpikeContainer",
-      "image": "./containers/garmin-spike/Dockerfile",
+      "class_name": "GarminContainer",
+      "image": "./containers/garmin-runner/Dockerfile",
       "max_instances": 1
     }
   ],
@@ -67,8 +71,8 @@
         "class_name": "BrainfogMCP"
       },
       {
-        "name": "GARMIN_SPIKE_CONTAINER",
-        "class_name": "GarminSpikeContainer"
+        "name": "GARMIN_CONTAINER",
+        "class_name": "GarminContainer"
       }
     ]
   },
@@ -89,6 +93,10 @@
     {
       "tag": "v2-garmin-spike-container",
       "new_sqlite_classes": ["GarminSpikeContainer"]
+    },
+    {
+      "tag": "v3-garmin-container",
+      "new_sqlite_classes": ["GarminContainer"]
     }
   ]
 }
