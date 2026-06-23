@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { raw } from "hono/html";
 import type { FC } from "hono/jsx";
+import { getCredentialStatus } from "../credentials";
 import type { Env } from "../env";
+import { getConnector, listIngestionConnectors, listIngestionRuns } from "../ingestion";
 import { escapeHtml, markdownToHtml } from "../markdown";
 import {
   createUser,
@@ -307,6 +309,73 @@ function parseQueries(value: string | undefined) {
   }
 }
 
+const SENSITIVE_KEY_PATTERN =
+  /(password|passwd|pwd|token|secret|cookie|session|credential|authorization|bearer|encrypted|encryption|iv|payload|username|user[_-]?name|email|e[_-]?mail|login|account|garmin[_-]?(user|login|email)|oauth|refresh|access[_-]?token)/i;
+const SENSITIVE_VALUE_PATTERN =
+  /([a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)+|bearer\s+[a-z0-9._~+/-]+=*|password\s*[:=]|passwd\s*[:=]|pwd\s*[:=]|token\s*[:=]|session\s*[:=]|cookie\s*[:=]|secret\s*[:=]|credential\s*[:=]|authorization\s*[:=]|login\s*[:=]|username\s*[:=]|email\s*[:=]|sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9_]{12,}|xox[baprs]-[a-z0-9-]{12,}|eyj[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+)/i;
+
+function safeDisplayJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => safeDisplayJson(item));
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+      if (SENSITIVE_KEY_PATTERN.test(key)) {
+        out["[redacted]"] = "[redacted]";
+      } else {
+        out[key] = safeDisplayJson(item);
+      }
+    }
+    return out;
+  }
+  if (typeof value === "string" && SENSITIVE_VALUE_PATTERN.test(value)) return "[redacted]";
+  return value;
+}
+
+function JsonBlock({ value }: { value: unknown }) {
+  if (value === null || value === undefined) return <span>—</span>;
+  return <pre>{JSON.stringify(safeDisplayJson(value), null, 2)}</pre>;
+}
+
+function CredentialStatus({ status }: { status: Record<string, unknown> | null }) {
+  if (!status) return <p>No credential status is stored for this connector.</p>;
+  return (
+    <div class="metadata">
+      <div>Status: {String(status.status ?? "—")}</div>
+      <div>Auth type: {String(status.auth_type ?? "—")}</div>
+      <div>
+        Expires:{" "}
+        {typeof status.expires_at === "number" ? fmtDate(new Date(status.expires_at * 1000)) : "—"}
+      </div>
+      <div>
+        Last verified:{" "}
+        {typeof status.last_verified_at === "number"
+          ? fmtDate(new Date(status.last_verified_at * 1000))
+          : "—"}
+      </div>
+      <div>
+        Updated:{" "}
+        {typeof status.updated_at === "number" ? fmtDate(new Date(status.updated_at * 1000)) : "—"}
+      </div>
+    </div>
+  );
+}
+
+async function optionalCredentialStatus(c: AppContext, connectorId: string) {
+  try {
+    return await getCredentialStatus(memCtx(c), connectorId);
+  } catch (error) {
+    if (error instanceof MemoryError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+function connectorProject(
+  projects: Awaited<ReturnType<typeof listProjects>>,
+  projectId?: string | null,
+) {
+  return projectId ? projects.find((project) => project.id === projectId) : null;
+}
+
 function PageForm(props: {
   page?: Awaited<ReturnType<typeof getPage>>;
   action: string;
@@ -561,6 +630,18 @@ appRoutes.get("/", async (c: AppContext) => {
           >
             Metrics
           </a>
+          <a
+            href="/app/connectors"
+            style={{
+              padding: "0.75rem 1.5rem",
+              background: "#333",
+              color: "white",
+              borderRadius: "4px",
+              textDecoration: "none",
+            }}
+          >
+            Connectors
+          </a>
           {user.isAdmin ? (
             <a
               href="/app/users"
@@ -781,6 +862,230 @@ appRoutes.get("/metrics", async (c: AppContext) => {
       </div>
     </Layout>,
   );
+});
+
+// GET /app/connectors - Owner-scoped ingestion connector list
+appRoutes.get("/connectors", async (c: AppContext) => {
+  const user = c.get("user");
+  const ctx = memCtx(c);
+  const [connectors, projects] = await Promise.all([
+    listIngestionConnectors(ctx),
+    listProjects(ctx),
+  ]);
+  const credentialStatuses = await Promise.all(
+    connectors.map(async (connector) => ({
+      connectorId: connector.id,
+      status: await optionalCredentialStatus(c, connector.id),
+    })),
+  );
+  const credentialStatusByConnector = new Map(
+    credentialStatuses.map((row) => [row.connectorId, row.status?.status ?? null]),
+  );
+
+  return c.html(
+    <Layout user={user} currentPath="/app/connectors">
+      <h2>Ingestion Connectors</h2>
+      <div class="card">
+        <p>
+          Review connector definitions, operational status, and recent run state. Credential
+          payloads are never shown here.
+        </p>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Project</th>
+              <th>Last run</th>
+              <th>Last success</th>
+              <th>Last error</th>
+              <th>Credential status</th>
+              <th>Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {connectors.length ? (
+              connectors.map((connector) => {
+                const project = connectorProject(projects, connector.projectId);
+                return (
+                  <tr key={connector.id}>
+                    <td>{connector.name}</td>
+                    <td>{connector.type}</td>
+                    <td>{connector.status}</td>
+                    <td>{connector.source}</td>
+                    <td>
+                      {connector.projectId ? (
+                        project ? (
+                          <a href={`/app/browser/projects/${connector.projectId}`}>
+                            {project.name}
+                          </a>
+                        ) : (
+                          <code>{connector.projectId}</code>
+                        )
+                      ) : (
+                        "none"
+                      )}
+                    </td>
+                    <td>{fmtDate(connector.lastRunAt)}</td>
+                    <td>{fmtDate(connector.lastSuccessAt)}</td>
+                    <td>
+                      {connector.lastError ? String(safeDisplayJson(connector.lastError)) : "—"}
+                    </td>
+                    <td>{String(credentialStatusByConnector.get(connector.id) ?? "missing")}</td>
+                    <td>
+                      <a href={`/app/connectors/${connector.id}`}>View</a>
+                    </td>
+                  </tr>
+                );
+              })
+            ) : (
+              <tr>
+                <td colSpan={10}>No connectors found.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Layout>,
+  );
+});
+
+// GET /app/connectors/:id - Owner-scoped ingestion connector detail and run history
+appRoutes.get("/connectors/:id", async (c: AppContext) => {
+  const user = c.get("user");
+  try {
+    const connectorId = param(c, "id");
+    const ctx = memCtx(c);
+    const [connector, runs, projects, credentialStatus] = await Promise.all([
+      getConnector(ctx, connectorId),
+      listIngestionRuns(ctx, connectorId),
+      listProjects(ctx),
+      optionalCredentialStatus(c, connectorId),
+    ]);
+    const project = connectorProject(projects, connector.projectId);
+    const recentRuns = runs.slice(0, 25);
+    c.header("Cache-Control", "no-store");
+    return c.html(
+      <Layout user={user} currentPath="/app/connectors">
+        <p>
+          <a href="/app/connectors">← Back to Connectors</a>
+        </p>
+        <h2>{connector.name}</h2>
+        <div class="metadata">
+          <div>
+            ID: <code>{connector.id}</code>
+          </div>
+          <div>Type: {connector.type}</div>
+          <div>Source: {connector.source}</div>
+          <div>Status: {connector.status}</div>
+          <div>
+            Project:{" "}
+            {connector.projectId ? (
+              project ? (
+                <a href={`/app/browser/projects/${connector.projectId}`}>{project.name}</a>
+              ) : (
+                <code>{connector.projectId}</code>
+              )
+            ) : (
+              "none"
+            )}
+          </div>
+          <div>Created: {fmtDate(connector.createdAt)}</div>
+          <div>Updated: {fmtDate(connector.updatedAt)}</div>
+          <div>Last run: {fmtDate(connector.lastRunAt)}</div>
+          <div>Last success: {fmtDate(connector.lastSuccessAt)}</div>
+          <div>
+            Last error: {connector.lastError ? String(safeDisplayJson(connector.lastError)) : "—"}
+          </div>
+        </div>
+
+        <div class="grid">
+          <div class="card">
+            <h3>Configuration</h3>
+            <JsonBlock value={connector.config} />
+          </div>
+          <div class="card">
+            <h3>Schedule</h3>
+            <JsonBlock value={connector.schedule} />
+          </div>
+          <div class="card">
+            <h3>Cursor / checkpoint</h3>
+            <JsonBlock value={connector.cursor} />
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>Credential status</h3>
+          <CredentialStatus status={credentialStatus} />
+        </div>
+
+        <div class="card">
+          <h3>Recent runs</h3>
+          {recentRuns.length ? (
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Run id</th>
+                    <th>Trigger</th>
+                    <th>Status</th>
+                    <th>Started</th>
+                    <th>Finished</th>
+                    <th>Inserted</th>
+                    <th>Skipped</th>
+                    <th>Failed</th>
+                    <th>Cursor before</th>
+                    <th>Cursor after</th>
+                    <th>Error</th>
+                    <th>Metadata</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentRuns.map((run) => (
+                    <tr key={run.id}>
+                      <td>
+                        <code>{run.id}</code>
+                      </td>
+                      <td>{run.trigger}</td>
+                      <td>{run.status}</td>
+                      <td>{fmtDate(run.startedAt)}</td>
+                      <td>{fmtDate(run.finishedAt)}</td>
+                      <td>{run.insertedCount}</td>
+                      <td>{run.skippedCount}</td>
+                      <td>{run.failedCount}</td>
+                      <td>
+                        <JsonBlock value={run.cursorBefore} />
+                      </td>
+                      <td>
+                        <JsonBlock value={run.cursorAfter} />
+                      </td>
+                      <td>
+                        <JsonBlock value={run.error} />
+                      </td>
+                      <td>
+                        <JsonBlock value={run.metadata} />
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p>No ingestion runs recorded.</p>
+          )}
+        </div>
+      </Layout>,
+    );
+  } catch (error) {
+    if (error instanceof MemoryError) {
+      return c.html(errorPageContent(user, "Error", error.message), errorStatus(error.status));
+    }
+    throw error;
+  }
 });
 
 // GET /app/pages - Basic page management surface

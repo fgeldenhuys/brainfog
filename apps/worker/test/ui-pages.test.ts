@@ -1,6 +1,8 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
 import {
   createDb,
+  ingestionConnectors,
+  ingestionRuns,
   pageAccessLinks,
   pages,
   thoughts,
@@ -21,6 +23,23 @@ const USER_ID = "ui-pages-user";
 
 function cookie(token: string) {
   return { Cookie: `brainfog_token=${token}` };
+}
+
+async function apiFetch(path: string, init: RequestInit = {}, token = ADMIN_TOKEN) {
+  return SELF.fetch(`https://example.com${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      ...init.headers,
+    },
+  });
+}
+
+async function json<T>(response: Response): Promise<T> {
+  expect(response.status).toBeGreaterThanOrEqual(200);
+  expect(response.status).toBeLessThan(300);
+  return response.json() as Promise<T>;
 }
 
 async function mcpRequest(
@@ -140,7 +159,170 @@ describe("authenticated UI pages", () => {
     const html = await response.text();
     expect(html).toContain("Browser");
     expect(html).toContain("Metrics");
+    expect(html).toContain("Connectors");
     expect(html).toContain("Users");
+  });
+
+  it("renders owner-scoped connector list/detail pages without credential or run secrets", async () => {
+    const secretValues = [
+      "plain-garmin-password-021",
+      "garmin.user.021@example.com",
+      "config-login-identifier-021",
+      "cursor.email.021@example.com",
+      "schedule-login-identifier-021",
+      "message-token-021",
+      "last-error-token-021",
+      "run.metadata.021@example.com",
+      "run-error-token-021",
+      "Bearer ui-secret-token-021",
+      "session-cookie-value-021",
+      "encrypted-payload-blob-021",
+      "raw-runner-password-021",
+      "other-user-connector-021",
+    ];
+    const project = await createProject(
+      {
+        env,
+        user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+        source: "test:connector-ui",
+      },
+      { name: "Connector UI Project" },
+    );
+
+    const connector = await json<{ id: string }>(
+      await apiFetch("/api/v1/ingestion/connectors", {
+        method: "POST",
+        body: JSON.stringify({
+          type: "garmin",
+          name: "Garmin UI Connector",
+          project_id: project.id,
+          source: "ingestion:garmin-ui",
+          config: {
+            window: "daily",
+            username: "garmin.user.021@example.com",
+            email: "garmin.user.021@example.com",
+            login: "config-login-identifier-021",
+            message: "Garmin auth failed for garmin.user.021@example.com token=message-token-021",
+            password: "plain-garmin-password-021",
+            encrypted_payload: "encrypted-payload-blob-021",
+          },
+          schedule: {
+            frequency: "daily",
+            bearer_token: "Bearer ui-secret-token-021",
+            login: "schedule-login-identifier-021",
+          },
+          cursor: {
+            latest_date: "2026-06-23",
+            session_cookie: "session-cookie-value-021",
+            email: "cursor.email.021@example.com",
+          },
+        }),
+      }),
+    );
+    const otherConnector = await json<{ id: string }>(
+      await apiFetch(
+        "/api/v1/ingestion/connectors",
+        {
+          method: "POST",
+          body: JSON.stringify({ type: "garmin", name: "other-user-connector-021" }),
+        },
+        USER_TOKEN,
+      ),
+    );
+
+    await apiFetch(`/api/v1/ingestion/connectors/${connector.id}/credentials`, {
+      method: "PUT",
+      body: JSON.stringify({
+        auth_type: "password",
+        status: "valid",
+        payload: {
+          username: "garmin.user.021@example.com",
+          password: "plain-garmin-password-021",
+          token: "Bearer ui-secret-token-021",
+          session_cookie: "session-cookie-value-021",
+        },
+      }),
+    });
+    const run = await json<{ id: string }>(
+      await apiFetch(`/api/v1/ingestion/connectors/${connector.id}/runs`, {
+        method: "POST",
+        body: JSON.stringify({
+          trigger: "bridge",
+          cursor_after: { latest_date: "2026-06-24", session_cookie: "session-cookie-value-021" },
+          metadata: {
+            submitted_by: "ui-test",
+            email: "run.metadata.021@example.com",
+            message: "authorization=message-token-021",
+            runner_payload: { password: "raw-runner-password-021" },
+            note: "token: Bearer ui-secret-token-021",
+          },
+          points: [
+            {
+              source_item_id: "connector-ui-source-021",
+              series_key: "connector.ui.steps",
+              value: 21,
+              unit: "count",
+              observed_at: 1782172800,
+              metadata: { external_id: "connector-ui-source-021" },
+            },
+          ],
+        }),
+      }),
+    );
+    const db = createDb(env.DB);
+    await db
+      .update(ingestionConnectors)
+      .set({
+        lastError:
+          "Garmin login for garmin.user.021@example.com failed with token=last-error-token-021",
+      })
+      .where(eq(ingestionConnectors.id, connector.id));
+    await db
+      .update(ingestionRuns)
+      .set({
+        error: {
+          message: "Run failed for garmin.user.021@example.com token=run-error-token-021",
+          login: "config-login-identifier-021",
+        },
+      })
+      .where(eq(ingestionRuns.id, run.id));
+
+    const list = await SELF.fetch("https://example.com/app/connectors", {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(list.status).toBe(200);
+    const listHtml = await list.text();
+    expect(listHtml).toContain("Garmin UI Connector");
+    expect(listHtml).toContain("garmin");
+    expect(listHtml).toContain("active");
+    expect(listHtml).toContain("valid");
+    expect(listHtml).toContain(`/app/connectors/${connector.id}`);
+    expect(listHtml).not.toContain(otherConnector.id);
+    for (const secret of secretValues) expect(listHtml).not.toContain(secret);
+
+    const detail = await SELF.fetch(`https://example.com/app/connectors/${connector.id}`, {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(detail.status).toBe(200);
+    expect(detail.headers.get("cache-control")).toBe("no-store");
+    const detailHtml = await detail.text();
+    expect(detailHtml).toContain("Garmin UI Connector");
+    expect(detailHtml).toContain("Configuration");
+    expect(detailHtml).toContain("Schedule");
+    expect(detailHtml).toContain("Cursor / checkpoint");
+    expect(detailHtml).toContain("Credential status");
+    expect(detailHtml).toContain("Recent runs");
+    expect(detailHtml).toContain(run.id);
+    expect(detailHtml).toContain("bridge");
+    expect(detailHtml).toContain("succeeded");
+    expect(detailHtml).toContain("[redacted]");
+    expect(detailHtml).toContain("submitted_by");
+    for (const secret of secretValues) expect(detailHtml).not.toContain(secret);
+
+    const crossOwner = await SELF.fetch(`https://example.com/app/connectors/${connector.id}`, {
+      headers: cookie(USER_TOKEN),
+    });
+    expect(crossOwner.status).toBe(404);
   });
 
   it("renders metrics from owner-scoped service data", async () => {

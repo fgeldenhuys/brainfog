@@ -169,6 +169,7 @@ export const Layout: FC<{
               {navLink("/app/browser", "Browser", props.currentPath)}
               {navLink("/app/search", "Search", props.currentPath)}
               {navLink("/app/metrics", "Metrics", props.currentPath)}
+              {navLink("/app/connectors", "Connectors", props.currentPath)}
               {navLink("/app/pages", "Pages", props.currentPath)}
               {props.user.isAdmin ? navLink("/app/users", "Users", props.currentPath) : null}
             </nav>
