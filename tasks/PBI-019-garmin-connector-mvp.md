@@ -208,7 +208,7 @@ Tests do not need to call live Garmin or create production facts, but the PBI sh
 - [x] Runner dry-run/manual-run path documented without committed secrets.
 - [x] Garmin namespace convention documented for setup.
 - [x] `specs/ingestion/spec.md` DoD items for Garmin are updated with implementation/test evidence that does not claim a live promoted-runner verification.
-- [ ] Live Cloudflare-hosted promoted Garmin runner run with a real Garmin account verifies both daily and activity metrics in brainfog. Not completed during critic follow-up; opened PBI-020 because live Garmin access was unavailable.
+- [x] Live Cloudflare-hosted promoted Garmin runner run with a real Garmin account verifies both daily and activity metrics in brainfog. Evidence: PBI-020 completed an MCP-driven run through the deployed Worker/Garmin Container for connector `bfw03...kwn`; run `bfsf...3nu` succeeded with 71 inserted points, including 26 `garmin.daily.*` rows and 45 `garmin.activities.*` rows.
 - [x] `pnpm check && pnpm typecheck && pnpm test` pass after critic follow-up fixes; `pnpm build` also passes because Worker/container code changed. Evidence: reran both commands successfully during critic follow-up; Vitest reported 227 passing tests, and Wrangler dry-run rebuilt the Garmin container image.
 
 ## Critic Follow-Up Notes

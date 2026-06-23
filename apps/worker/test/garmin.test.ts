@@ -25,6 +25,72 @@ async function json<T>(response: Response): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function mcpRequest(
+  body: Record<string, unknown>,
+  sessionId?: string,
+  token = TOKEN_A,
+): Promise<{ response: Response; message?: Record<string, unknown>; sessionId?: string }> {
+  const response = await authFetch(
+    "/mcp",
+    {
+      method: "POST",
+      headers: {
+        accept: "application/json, text/event-stream",
+        ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+      },
+      body: JSON.stringify(body),
+    },
+    token,
+  );
+  const text = await response.text();
+  const dataLine = text
+    .split("\n")
+    .find((line) => line.startsWith("data: "))
+    ?.slice("data: ".length);
+  const message = (dataLine ? JSON.parse(dataLine) : text ? JSON.parse(text) : undefined) as
+    | Record<string, unknown>
+    | undefined;
+  return { response, message, sessionId: response.headers.get("mcp-session-id") ?? sessionId };
+}
+
+async function mcpSession(token = TOKEN_A) {
+  const init = await mcpRequest(
+    {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "brainfog-test", version: "0.1.0" },
+      },
+    },
+    undefined,
+    token,
+  );
+  expect(init.response.status).toBe(200);
+  expect(init.sessionId).toBeTruthy();
+  await mcpRequest(
+    { jsonrpc: "2.0", method: "notifications/initialized", params: {} },
+    init.sessionId,
+    token,
+  );
+  return init.sessionId ?? "";
+}
+
+async function callMcpTool<T>(name: string, args: Record<string, unknown>, token = TOKEN_A) {
+  const session = await mcpSession(token);
+  const result = await mcpRequest(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } },
+    session,
+    token,
+  );
+  expect(result.response.status).toBe(200);
+  const m = result.message as { result?: { content?: { text?: string }[] }; error?: unknown };
+  expect(m.error).toBeUndefined();
+  return JSON.parse(m.result?.content?.[0]?.text ?? "null") as T;
+}
+
 async function createConnector(token = TOKEN_A, type = "garmin", status = "active") {
   return json<{ id: string; ownerId: string }>(
     await authFetch(
@@ -232,6 +298,62 @@ describe("Garmin connector", () => {
       .from(timeSeriesPoints)
       .where(eq(timeSeriesPoints.ownerId, "user-garmin-a"));
     expect(after).toHaveLength(before.length);
+    await pauseConnector(connector.id);
+  });
+
+  it("exposes Garmin setup, credential storage, run, and verification through MCP", async () => {
+    const connector = await callMcpTool<{ id: string; type: string; status: string }>(
+      "create_ingestion_connector",
+      { type: "garmin", name: "MCP Garmin", status: "active" },
+    );
+    expect(connector).toMatchObject({ type: "garmin", status: "active" });
+
+    const credentials = await callMcpTool<{
+      connector_id: string;
+      status: string;
+      redacted_summary: Record<string, unknown>;
+    }>("set_connector_credentials", {
+      connector_id: connector.id,
+      auth_type: "garmin_password",
+      payload: { username: "mcp@example.com", password: "super-secret-password" },
+    });
+    expect(credentials).toMatchObject({ connector_id: connector.id, status: "valid" });
+    expect(JSON.stringify(credentials)).not.toContain("super-secret-password");
+
+    const credentialStatus = await callMcpTool<Record<string, unknown>>(
+      "get_connector_credentials",
+      {
+        connector_id: connector.id,
+      },
+    );
+    expect(JSON.stringify(credentialStatus)).not.toContain("super-secret-password");
+
+    const preview = await callMcpTool<{ dry_run: boolean; point_count: number }>(
+      "run_garmin_connector",
+      { connector_id: connector.id, dry_run: true, runner_payload: garminPayload() },
+    );
+    expect(preview).toMatchObject({ dry_run: true, point_count: 17 });
+
+    const run = await callMcpTool<{ id: string; status: string; insertedCount: number }>(
+      "run_garmin_connector",
+      { connector_id: connector.id, runner_payload: garminPayload() },
+    );
+    expect(run).toMatchObject({ status: "succeeded", insertedCount: 17 });
+
+    const runs = await callMcpTool<{ id: string; status: string }[]>("list_ingestion_runs", {
+      connector_id: connector.id,
+    });
+    expect(runs[0]).toMatchObject({ id: run.id, status: "succeeded" });
+
+    const daily = await callMcpTool<{ seriesKey: string }[]>("list_time_series_points", {
+      series_prefix: "garmin.daily",
+    });
+    const activities = await callMcpTool<{ seriesKey: string }[]>("list_time_series_points", {
+      series_prefix: "garmin.activities",
+    });
+    expect(daily.some((point) => point.seriesKey === "garmin.daily.steps")).toBe(true);
+    expect(activities.some((point) => point.seriesKey === "garmin.activities.distance")).toBe(true);
+
     await pauseConnector(connector.id);
   });
 

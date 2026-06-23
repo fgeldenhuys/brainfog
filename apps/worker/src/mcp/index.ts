@@ -1,7 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
+import {
+  createOrReplaceConnectorCredentials,
+  deleteConnectorCredentials,
+  getCredentialStatus,
+} from "../credentials";
 import type { Env } from "../env";
+import { runGarminConnector } from "../garmin";
+import {
+  createIngestionConnector,
+  listIngestionConnectors,
+  listIngestionRuns,
+  updateIngestionConnector,
+} from "../ingestion";
 import {
   addDocument,
   createDependency,
@@ -57,6 +69,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     }));
 
     const obj = z.record(z.string(), z.unknown()).optional();
+    const requiredObj = z.record(z.string(), z.unknown());
     const strings = z.array(z.string()).optional();
     const nullableString = z.string().nullable().optional();
     const nullableNumber = z.number().nullable().optional();
@@ -330,6 +343,92 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           .optional(),
       },
       (args) => recordTimeSeriesPoints(this.memoryCtx(), args),
+    );
+    register(
+      "create_ingestion_connector",
+      "Create an owner-scoped automated ingestion connector definition.",
+      {
+        type: z.string(),
+        name: z.string().optional(),
+        project_id: nullableString,
+        source: z.string().optional(),
+        status: z.enum(["active", "paused", "disabled"]).optional(),
+        config: obj,
+        schedule: z.record(z.string(), z.unknown()).nullable().optional(),
+        cursor: z.record(z.string(), z.unknown()).nullable().optional(),
+      },
+      (args) => createIngestionConnector(this.memoryCtx(), args),
+    );
+    register("list_ingestion_connectors", "List owner-scoped ingestion connectors.", {}, () =>
+      listIngestionConnectors(this.memoryCtx()),
+    );
+    register(
+      "update_ingestion_connector",
+      "Update an owner-scoped automated ingestion connector definition.",
+      {
+        id: z.string(),
+        type: z.string().optional(),
+        name: z.string().optional(),
+        project_id: nullableString,
+        source: z.string().optional(),
+        status: z.enum(["active", "paused", "disabled"]).optional(),
+        config: obj,
+        schedule: z.record(z.string(), z.unknown()).nullable().optional(),
+        cursor: z.record(z.string(), z.unknown()).nullable().optional(),
+      },
+      ({ id, ...args }) => updateIngestionConnector(this.memoryCtx(), String(id), args),
+    );
+    register(
+      "list_ingestion_runs",
+      "List run history for one owner-scoped ingestion connector.",
+      { connector_id: z.string() },
+      (args) => listIngestionRuns(this.memoryCtx(), String(args.connector_id)),
+    );
+    register(
+      "set_connector_credentials",
+      "Create or replace encrypted credentials for one owner-scoped ingestion connector. Plaintext is accepted only in this request and never returned.",
+      {
+        connector_id: z.string(),
+        auth_type: z.string().optional(),
+        payload: requiredObj,
+        status: z
+          .enum(["missing", "valid", "needs_setup", "mfa_required", "expired", "revoked", "error"])
+          .optional(),
+        expires_at: nullableNumber,
+      },
+      ({ connector_id, ...args }) =>
+        createOrReplaceConnectorCredentials(this.memoryCtx(), String(connector_id), {
+          auth_type: args.auth_type as string | undefined,
+          payload: args.payload as Record<string, unknown>,
+          status: args.status as string | undefined,
+          expires_at: args.expires_at as number | undefined,
+        }),
+    );
+    register(
+      "get_connector_credentials",
+      "Get redacted credential status for one owner-scoped ingestion connector; plaintext is never returned.",
+      { connector_id: z.string() },
+      (args) => getCredentialStatus(this.memoryCtx(), String(args.connector_id)),
+    );
+    register(
+      "delete_connector_credentials",
+      "Revoke encrypted credentials for one owner-scoped ingestion connector.",
+      { connector_id: z.string() },
+      (args) => deleteConnectorCredentials(this.memoryCtx(), String(args.connector_id)),
+    );
+    register(
+      "run_garmin_connector",
+      "Run one owner-scoped Garmin connector. If runner_payload is supplied, validates/records that bounded payload; otherwise invokes the promoted Cloudflare Garmin Container with encrypted connector credentials. Use dry_run to preview normalized points without writing rows.",
+      {
+        connector_id: z.string(),
+        dry_run: z.boolean().optional(),
+        runner_payload: requiredObj.optional(),
+      },
+      ({ connector_id, ...args }) =>
+        runGarminConnector(this.memoryCtx(), String(connector_id), {
+          dry_run: args.dry_run as boolean | undefined,
+          runner_payload: args.runner_payload as Record<string, unknown> | undefined,
+        }),
     );
     register(
       "upsert_person",

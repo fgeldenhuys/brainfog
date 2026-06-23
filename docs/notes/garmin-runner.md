@@ -2,10 +2,11 @@
 
 The Garmin connector uses unofficial Garmin Connect access through `python-garminconnect` in a Cloudflare Container (`GarminContainer`). It is not Garmin's official business/developer API. Known risks from the PBI-018 spike remain: Garmin may change private endpoints, require MFA, rate-limit, or block Cloudflare egress.
 
-PBI-019 implementation and critic follow-up verified the brainfog-side bounded payload, normalization, idempotency, scheduled failure isolation, and container build paths with tests. A live Cloudflare-hosted run of the promoted MVP runner against a real Garmin connector was not performed during critic follow-up; PBI-020 tracks that required verification before claiming production readiness.
+PBI-019 implementation and critic follow-up verified the brainfog-side bounded payload, normalization, idempotency, scheduled failure isolation, and container build paths with tests. PBI-020 completed the required live Cloudflare-hosted promoted-runner verification through MCP: connector `bfw03...kwn`, run `bfsf...3nu`, cursor window `2026-06-01` through `2026-06-23`, status `succeeded`, 71 inserted points, 26 `garmin.daily.*` rows, and 45 `garmin.activities.*` rows. Credentials were stored through encrypted connector credentials and only redacted credential metadata was returned.
 
 ## Manual and dry-run paths
 
+- Agent-facing MCP path: create or identify a `garmin` connector with `create_ingestion_connector`/`list_ingestion_connectors`, store encrypted credentials with `set_connector_credentials`, invoke the runner with `run_garmin_connector`, inspect run history with `list_ingestion_runs`, and verify rows with `list_time_series_points` filtered by `garmin.daily` and `garmin.activities` prefixes. Credential responses return redacted metadata only.
 - Brainfog-side validation/normalization dry run: `POST /api/v1/ingestion/connectors/:id/garmin-runs` with `{ "dry_run": true, "runner_payload": { "daily": [...], "activities": [...] } }`. This returns normalized point previews and does not write time-series rows.
 - Manual bounded ingest: `POST /api/v1/ingestion/connectors/:id/garmin-runs` with a bounded runner payload containing only documented `daily`, `activities`, and optional `cursor` fields. This records an ingestion run and writes idempotent time-series points.
 - Cloudflare-hosted scheduled sync invokes the Garmin Container once per active `garmin` connector, decrypting only that connector's credential payload for the invocation.

@@ -104,6 +104,11 @@ type GarminRunner = (
   credentials: Record<string, unknown>,
 ) => Promise<Record<string, unknown>>;
 
+type GarminRunInput = {
+  dry_run?: boolean;
+  runner_payload?: Record<string, unknown>;
+};
+
 function unixSeconds(value: Date) {
   return Math.floor(value.getTime() / 1000);
 }
@@ -514,6 +519,49 @@ export async function invokeGarminContainer(
   return result;
 }
 
+async function refreshGarminCredentials(
+  ctx: MemoryCtx,
+  connectorId: string,
+  runnerPayload: Record<string, unknown>,
+) {
+  const normalized = normalizeGarminPayload(runnerPayload);
+  if (!normalized.payload.refreshed_credentials) return;
+  await createOrReplaceConnectorCredentials(ctx, connectorId, {
+    auth_type: "garmin_session",
+    payload: normalized.payload.refreshed_credentials,
+    status: normalized.payload.credential_status ?? "valid",
+  });
+}
+
+export async function runGarminConnector(
+  ctx: MemoryCtx,
+  connectorId: string,
+  input: GarminRunInput = {},
+  runner: GarminRunner = async (runCtx, connector, credentials) =>
+    invokeGarminContainer(runCtx.env, connector, credentials),
+) {
+  const connector = await getConnector(ctx, connectorId);
+  if (connector.type !== "garmin")
+    throw new MemoryError(400, "connector is not a Garmin connector");
+  const runnerPayload =
+    input.runner_payload ?? (await runnerWithCredentials(ctx, connector, runner));
+  const result = await recordGarminRunnerPayload(ctx, connectorId, runnerPayload, {
+    trigger: "manual",
+    dryRun: input.dry_run === true,
+  });
+  if (input.dry_run !== true) await refreshGarminCredentials(ctx, connectorId, runnerPayload);
+  return result;
+}
+
+async function runnerWithCredentials(
+  ctx: MemoryCtx,
+  connector: typeof ingestionConnectors.$inferSelect,
+  runner: GarminRunner,
+) {
+  const credentials = await decryptConnectorCredentials(ctx, connector.id);
+  return runner(ctx, connector, credentials.payload as Record<string, unknown>);
+}
+
 async function recordFailedScheduledGarminRun(
   ctx: MemoryCtx,
   connector: typeof ingestionConnectors.$inferSelect,
@@ -584,14 +632,7 @@ export async function dispatchScheduledGarminRuns(
       const run = await recordGarminRunnerPayload(runCtx, row.connector.id, runnerPayload, {
         trigger: "scheduled",
       });
-      const normalized = normalizeGarminPayload(runnerPayload);
-      if (normalized.payload.refreshed_credentials) {
-        await createOrReplaceConnectorCredentials(runCtx, row.connector.id, {
-          auth_type: "garmin_session",
-          payload: normalized.payload.refreshed_credentials,
-          status: normalized.payload.credential_status ?? "valid",
-        });
-      }
+      await refreshGarminCredentials(runCtx, row.connector.id, runnerPayload);
       results.push({ connector_id: row.connector.id, run });
     } catch (error) {
       const run = await recordFailedScheduledGarminRun(runCtx, row.connector, error, secretSource);

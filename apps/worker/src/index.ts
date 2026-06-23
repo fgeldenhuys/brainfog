@@ -12,6 +12,7 @@ import { uiRoutes } from "./ui";
 
 export { D1BackupWorkflow } from "./d1-backup-workflow";
 export { GarminContainer } from "./garmin-container";
+export { GarminSpikeContainer } from "./garmin-spike-container";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
