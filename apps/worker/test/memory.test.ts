@@ -4,6 +4,7 @@ import {
   dependencyEdges,
   documentChunks,
   documents,
+  documentVersions,
   facts,
   people,
   projects,
@@ -586,6 +587,183 @@ describe("memory model REST service", () => {
     ).toBe(0);
   });
 
+  it("document overwrite mode creates no historical version", async () => {
+    const doc = await json<{ id: string; currentVersionNumber: number }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Overwrite", content: "first body" }),
+      }),
+    );
+    expect(doc.currentVersionNumber).toBeUndefined();
+
+    const updated = await json<{ currentVersionNumber: number; sizeBytes: number }>(
+      await authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "second body", write_mode: "overwrite_current" }),
+      }),
+    );
+    expect(updated.currentVersionNumber).toBe(1);
+    expect(
+      await createDb(env.DB)
+        .select()
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, doc.id)),
+    ).toHaveLength(0);
+  });
+
+  it("rejects malformed REST document write_mode values", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Bad mode", content: "first body" }),
+      }),
+    );
+
+    const response = await authFetch(`/api/v1/documents/${doc.id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ content: "second body", write_mode: 42 }),
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid document write_mode" });
+    const content = await authFetch(`/api/v1/documents/${doc.id}/content`);
+    expect(await content.text()).toContain("first body");
+    expect(
+      await createDb(env.DB)
+        .select()
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, doc.id)),
+    ).toHaveLength(0);
+  });
+
+  it("create_version preserves previous text and keeps current chunks/recall current-only", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({
+          title: "Versioned",
+          content: "old historical-only zephyr keyword",
+        }),
+      }),
+    );
+    const updated = await json<{ currentVersionNumber: number }>(
+      await authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          content: "new current-only aurora keyword",
+          write_mode: "create_version",
+        }),
+      }),
+    );
+    expect(updated.currentVersionNumber).toBe(2);
+    const afterUpdate = (
+      await createDb(env.DB).select().from(documents).where(eq(documents.id, doc.id))
+    )[0];
+    if (!afterUpdate) throw new Error("expected updated document");
+    const versions = await json<
+      Array<{ id?: string; is_current: boolean; version_number: number; r2Key?: string }>
+    >(await authFetch(`/api/v1/documents/${doc.id}/versions`));
+    expect(versions.map((v) => v.version_number)).toEqual([2, 1]);
+    expect(versions.every((v) => v.r2Key === undefined)).toBe(true);
+    const historical = versions.find((v) => !v.is_current);
+    expect(historical?.id?.endsWith("d")).toBe(true);
+
+    const previous = await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`);
+    expect(previous.status).toBe(200);
+    expect(await previous.text()).toContain("old historical-only zephyr");
+    const afterRead = (
+      await createDb(env.DB).select().from(documents).where(eq(documents.id, doc.id))
+    )[0];
+    if (!afterRead) throw new Error("expected document after version read");
+    expect(afterRead.updatedAt?.getTime()).toBe(afterUpdate.updatedAt?.getTime());
+
+    const chunks = await json<{ content: string }[]>(
+      await authFetch(`/api/v1/documents/${doc.id}/chunks`),
+    );
+    expect(chunks.map((c) => c.content).join("\n")).toContain("new current-only aurora");
+    expect(chunks.map((c) => c.content).join("\n")).not.toContain("old historical-only zephyr");
+    const recalledOld = await json<{ kind: string }[]>(
+      await authFetch("/api/v1/recall?q=zephyr%20keyword&kinds=document_chunk"),
+    );
+    expect(recalledOld.some((r) => r.kind === "document_chunk")).toBe(false);
+  });
+
+  it("deleting a versioned document cascades version rows and removes historical R2 bytes", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Delete versions", content: "historical content" }),
+      }),
+    );
+    await json(
+      await authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "current content", write_mode: "create_version" }),
+      }),
+    );
+    const version = (
+      await createDb(env.DB)
+        .select({ r2Key: documentVersions.r2Key })
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, doc.id))
+    )[0];
+    if (!version) throw new Error("expected historical version row");
+    expect(await env.DOCUMENTS.get(version.r2Key)).not.toBeNull();
+
+    await json(await authFetch(`/api/v1/documents/${doc.id}`, { method: "DELETE" }));
+
+    expect(
+      await createDb(env.DB)
+        .select()
+        .from(documentVersions)
+        .where(eq(documentVersions.documentId, doc.id)),
+    ).toHaveLength(0);
+    expect(await env.DOCUMENTS.get(version.r2Key)).toBeNull();
+  });
+
+  it("document versions enforce owner/private reads and allow shared reads", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Private versions", content: "private v1" }),
+      }),
+    );
+    await json(
+      await authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "private v2", write_mode: "create_version" }),
+      }),
+    );
+    expect((await authFetch(`/api/v1/documents/${doc.id}/versions`, {}, TOKEN_B)).status).toBe(404);
+    expect(
+      (await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`, {}, TOKEN_B)).status,
+    ).toBe(404);
+    expect(
+      (
+        await authFetch(
+          `/api/v1/documents/${doc.id}`,
+          {
+            method: "PATCH",
+            body: JSON.stringify({ content: "bad", write_mode: "create_version" }),
+          },
+          TOKEN_B,
+        )
+      ).status,
+    ).toBe(404);
+    await setShared(
+      { env, user: { id: "user-memory-a", name: "Memory A" } },
+      {
+        entity_kind: "document",
+        entity_id: doc.id,
+        shared: true,
+      },
+    );
+    expect((await authFetch(`/api/v1/documents/${doc.id}/versions`, {}, TOKEN_B)).status).toBe(200);
+    expect(
+      (await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`, {}, TOKEN_B)).status,
+    ).toBe(200);
+  });
+
   it("direct text upload stores R2 bytes, chunks them, and supports recall", async () => {
     const body = new TextEncoder().encode("Direct text upload has a recallable nebula keyword.");
     const doc = await json<{ id: string; r2Key: string; source: string; ownerId: string }>(
@@ -646,6 +824,33 @@ describe("memory model REST service", () => {
     expect(download.status).toBe(200);
     expect(download.headers.get("content-type")).toContain("application/zip");
     expect(download.headers.get("content-disposition")).toContain("attachment");
+    expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("binary historical version downloads exact previous bytes", async () => {
+    const bytes = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0, 1, 2]);
+    const doc = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=Binary%20Version&mime_type=application%2Foctet-stream&filename=backup.bin",
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: bytes,
+        },
+      ),
+    );
+    await json(
+      await authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "new opaque current", write_mode: "create_version" }),
+      }),
+    );
+    const textRoute = await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`);
+    expect(textRoute.status).toBe(400);
+    const download = await authFetch(`/api/v1/documents/${doc.id}/versions/1/download`);
+    expect(download.status).toBe(200);
+    expect(download.headers.get("content-type")).toContain("application/octet-stream");
     expect(download.headers.get("x-content-type-options")).toBe("nosniff");
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
   });
@@ -2137,6 +2342,8 @@ describe("memory model REST service", () => {
         "update_fact",
         "add_document",
         "update_document",
+        "list_document_versions",
+        "get_document_version",
         "recall",
         "create_task",
         "update_task",
@@ -2202,6 +2409,56 @@ describe("memory model REST service", () => {
     expect(download.document_id).toBe(doc.id);
     expect(download.headers.Authorization).toContain("<your existing brainfog bearer token>");
     expect(JSON.stringify(download)).not.toContain(TOKEN_A);
+  });
+
+  it("MCP document version tools list metadata and return text or download instructions", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "MCP versions", content: "mcp previous text" }),
+      }),
+    );
+    await callMcpTool("update_document", {
+      id: doc.id,
+      content: "mcp current text",
+      write_mode: "create_version",
+    });
+    const versions = await callMcpTool<
+      Array<{ r2Key?: string; is_current: boolean; version_number: number }>
+    >("list_document_versions", { document_id: doc.id });
+    expect(versions.map((v) => v.version_number)).toEqual([2, 1]);
+    expect(JSON.stringify(versions)).not.toContain("r2Key");
+    const previous = await callMcpTool<{ content: string; metadata: { r2Key?: string } }>(
+      "get_document_version",
+      { document_id: doc.id, version_number: 1 },
+    );
+    expect(previous.content).toContain("mcp previous text");
+    expect(previous.metadata.r2Key).toBeUndefined();
+
+    const binaryDoc = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=MCP%20binary%20version&mime_type=application%2Foctet-stream",
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: new Uint8Array([1, 3, 5]),
+        },
+      ),
+    );
+    await callMcpTool("update_document", {
+      id: binaryDoc.id,
+      content: "opaque replacement",
+      write_mode: "create_version",
+    });
+    const binaryPrevious = await callMcpTool<{
+      content: null;
+      download: { url: string };
+      metadata: object;
+    }>("get_document_version", { document_id: binaryDoc.id, version_number: 1 });
+    expect(binaryPrevious.content).toBeNull();
+    expect(binaryPrevious.download.url).toContain(`/api/v1/documents/${binaryDoc.id}/versions/`);
+    expect(JSON.stringify(binaryPrevious)).not.toContain(TOKEN_A);
+    expect(JSON.stringify(binaryPrevious)).not.toContain("AQMF");
   });
 
   it("MCP upload-link command_example is a static template and does not interpolate hostile values", async () => {

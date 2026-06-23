@@ -199,12 +199,38 @@ export const documents = sqliteTable(
     r2Key: text("r2_key").notNull(),
     mimeType: text("mime_type").notNull().default("text/markdown"),
     sizeBytes: integer("size_bytes"),
+    currentVersionNumber: integer("current_version_number").notNull().default(1),
     shared: integer("shared", { mode: "boolean" }).notNull().default(false),
     ...timestamps,
   },
   (table) => [
     index("documents_owner_project_idx").on(table.ownerId, table.projectId),
     index("documents_shared_idx").on(table.shared),
+  ],
+);
+
+export const documentVersions = sqliteTable(
+  "document_versions",
+  {
+    id: text("id").primaryKey(),
+    documentId: text("document_id")
+      .notNull()
+      .references(() => documents.id, { onDelete: "cascade" }),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    source: text("source").notNull(),
+    versionNumber: integer("version_number").notNull(),
+    r2Key: text("r2_key").notNull(),
+    mimeType: text("mime_type").notNull().default("application/octet-stream"),
+    sizeBytes: integer("size_bytes"),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().default(sql`(unixepoch())`),
+  },
+  (table) => [
+    unique("document_versions_document_version_unique").on(table.documentId, table.versionNumber),
+    index("document_versions_document_version_idx").on(table.documentId, table.versionNumber),
+    index("document_versions_owner_created_idx").on(table.ownerId, table.createdAt),
+    index("document_versions_document_id_idx").on(table.documentId, table.id),
   ],
 );
 

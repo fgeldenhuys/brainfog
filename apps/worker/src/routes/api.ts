@@ -24,12 +24,16 @@ import {
   deleteDocument,
   deleteFact,
   deleteThought,
+  documentWriteModes,
   getChunksForDocument,
   getDocumentBytes,
   getDocumentContent,
+  getDocumentVersionBytes,
+  getDocumentVersionContent,
   linkThought,
   listDependencies,
   listDocuments,
+  listDocumentVersions,
   listFacts,
   listPeople,
   listProjects,
@@ -95,6 +99,17 @@ const param = (c: ApiContext, name: string) => {
   if (!value) throw new MemoryError(400, `missing ${name}`);
   return value;
 };
+
+function documentWriteModeFromPayload(payload: Record<string, unknown>) {
+  if (!Object.hasOwn(payload, "write_mode") || payload.write_mode == null) return undefined;
+  if (
+    typeof payload.write_mode === "string" &&
+    (documentWriteModes as readonly string[]).includes(payload.write_mode)
+  ) {
+    return payload.write_mode as Parameters<typeof updateDocument>[3];
+  }
+  throw new MemoryError(400, "invalid document write_mode");
+}
 
 apiRoutes.patch(
   "/whoami",
@@ -223,9 +238,48 @@ apiRoutes.patch(
         ctx(c),
         param(c, "id"),
         String(payload.content ?? ""),
-        payload.derived_from as Parameters<typeof updateDocument>[3],
+        documentWriteModeFromPayload(payload),
+        payload.derived_from as Parameters<typeof updateDocument>[4],
       ),
     );
+  }),
+);
+apiRoutes.get(
+  "/documents/:id/versions",
+  route(async (c) => c.json(await listDocumentVersions(ctx(c), param(c, "id")))),
+);
+apiRoutes.get(
+  "/documents/:id/versions/:version/content",
+  route(async (c) => {
+    const result = await getDocumentVersionContent(
+      ctx(c),
+      param(c, "id"),
+      versionSelector(param(c, "version")),
+    );
+    return new Response(result.content, {
+      headers: { "content-type": result.version.mimeType || "text/plain" },
+    });
+  }),
+);
+apiRoutes.get(
+  "/documents/:id/versions/:version/download",
+  route(async (c) => {
+    const result = await getDocumentVersionBytes(
+      ctx(c),
+      param(c, "id"),
+      versionSelector(param(c, "version")),
+    );
+    const filename = safeDownloadFilename(
+      c.req.query("filename") ?? result.filename ?? "document-version",
+    );
+    return new Response(result.bytes, {
+      headers: {
+        "content-type": result.version.mimeType || "application/octet-stream",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "content-length": String(result.bytes.byteLength),
+        "x-content-type-options": "nosniff",
+      },
+    });
   }),
 );
 apiRoutes.delete(
@@ -263,6 +317,11 @@ apiRoutes.get(
 
 function safeDownloadFilename(value: string) {
   return value.replace(/[\\/\r\n\0"]/g, "_").trim() || "document";
+}
+
+function versionSelector(value: string) {
+  if (/^\d+$/.test(value)) return { version_number: Number(value) };
+  return { version_id: value };
 }
 
 apiRoutes.get(

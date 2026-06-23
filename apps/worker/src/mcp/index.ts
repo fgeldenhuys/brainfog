@@ -22,8 +22,10 @@ import {
   createProject,
   createTask,
   deleteDependency,
+  getDocumentVersionForMcp,
   linkThought,
   listDependencies,
+  listDocumentVersions,
   listPeople,
   listProjects,
   listStale,
@@ -88,6 +90,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       })
       .nullable()
       .optional();
+    const documentWriteMode = z.enum(["overwrite_current", "create_version"]).optional();
 
     // Register prompts for agent guidance on memory usage
     this.server.prompt(
@@ -242,14 +245,35 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "update_document",
-      "Replace a document's content and regenerate chunks.",
-      { id: z.string(), content: z.string(), derived_from: obj },
+      "Replace a document's current content and regenerate current chunks. write_mode='overwrite_current' (default for compatibility) creates no history; write_mode='create_version' preserves the outgoing current content as a historical R2-backed version before replacing it.",
+      { id: z.string(), content: z.string(), write_mode: documentWriteMode, derived_from: obj },
       (args) =>
         updateDocument(
           this.memoryCtx(),
           String(args.id),
           String(args.content),
-          args.derived_from as Parameters<typeof updateDocument>[3],
+          args.write_mode as Parameters<typeof updateDocument>[3],
+          args.derived_from as Parameters<typeof updateDocument>[4],
+        ),
+    );
+    register(
+      "list_document_versions",
+      "List document version metadata for a readable document. Includes current version metadata and historical rows, but never raw R2 keys or content bytes.",
+      { document_id: z.string() },
+      (args) => listDocumentVersions(this.memoryCtx(), String(args.document_id)),
+    );
+    register(
+      "get_document_version",
+      "Retrieve a previous document version by version_id or version_number. Text-like versions return text content; binary/non-text versions return metadata and authenticated REST download instructions, never inline bytes/base64.",
+      {
+        document_id: z.string(),
+        version_id: z.string().optional(),
+        version_number: z.number().int().optional(),
+      },
+      (args) =>
+        getDocumentVersionForMcp(
+          this.memoryCtx(),
+          args as Parameters<typeof getDocumentVersionForMcp>[1],
         ),
     );
     register(

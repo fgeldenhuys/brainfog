@@ -3,6 +3,7 @@ import {
   dependencyEdges,
   documentChunks,
   documents,
+  documentVersions,
   facts,
   people,
   projects,
@@ -36,6 +37,7 @@ const suffix = {
   timeSeriesPoint: "s",
   document: "d",
   documentChunk: "c",
+  documentVersion: "d",
   thought: "t",
   dependencyEdge: "e",
   page: "g",
@@ -1876,6 +1878,21 @@ export async function addDocument(
 }
 
 const directDocumentUploadMaxBytes = 25 * 1024 * 1024;
+export const documentWriteModes = ["overwrite_current", "create_version"] as const;
+export type DocumentWriteMode = (typeof documentWriteModes)[number];
+
+function documentWriteMode(value: unknown): DocumentWriteMode {
+  if (value === undefined || value === null) return "overwrite_current";
+  if (typeof value === "string" && (documentWriteModes as readonly string[]).includes(value)) {
+    return value as DocumentWriteMode;
+  }
+  throw new MemoryError(400, "invalid document write_mode");
+}
+
+function safeVersionMetadata<T extends { r2Key?: string }>(row: T) {
+  const { r2Key: _r2Key, ...safe } = row;
+  return safe;
+}
 
 function isTextLikeMimeType(mimeType: string) {
   const value = mimeType.toLowerCase().split(";")[0]?.trim() ?? "";
@@ -1984,6 +2001,35 @@ export async function getDocumentBytes(ctx: Ctx, id: string) {
   const object = await ctx.env.DOCUMENTS.get(doc.r2Key);
   if (!object) throw new MemoryError(404, "document content not found");
   return { doc, bytes: await object.arrayBuffer(), filename: object.customMetadata?.filename };
+}
+
+async function getReadableDocument(ctx: Ctx, id: string) {
+  const doc = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(documents)
+      .where(
+        and(
+          eq(documents.id, id),
+          or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
+        ),
+      )
+      .limit(1)
+  )[0];
+  if (!doc) throw new MemoryError(404, "document not found");
+  return doc;
+}
+
+async function getOwnedDocument(ctx: Ctx, id: string) {
+  const doc = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  if (!doc) throw new MemoryError(404, "document not found");
+  return doc;
 }
 
 function transferPath(path: string, params: Record<string, string | undefined>) {
@@ -2100,6 +2146,7 @@ async function insertChunks(
   documentId: string,
   content: string,
   projectId: string | null,
+  shared = false,
 ) {
   const db = createDb(ctx.env.DB);
   let i = 0;
@@ -2109,7 +2156,7 @@ async function insertChunks(
     await upsertVector(ctx, id, await embed(ctx, chunk), {
       kind: "document_chunk",
       owner_id: ctx.user.id,
-      shared: false,
+      shared,
       ...(projectId ? { project_id: projectId } : {}),
     });
     i += 1;
@@ -2120,18 +2167,44 @@ export async function updateDocument(
   ctx: Ctx,
   id: string,
   content: string,
-  derivedFrom?: Parameters<typeof applyFactDerivations>[2],
+  writeModeOrDerivedFrom?: DocumentWriteMode | Parameters<typeof applyFactDerivations>[2],
+  derivedFromInput?: Parameters<typeof applyFactDerivations>[2],
 ) {
   const db = createDb(ctx.env.DB);
-  const doc = (
-    await db
-      .select()
-      .from(documents)
-      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-      .limit(1)
-  )[0];
-  if (!doc) throw new MemoryError(404, "document not found");
+  const doc = await getOwnedDocument(ctx, id);
+  const writeMode = (() => {
+    if (typeof writeModeOrDerivedFrom === "string" || writeModeOrDerivedFrom == null) {
+      return documentWriteMode(writeModeOrDerivedFrom);
+    }
+    if (derivedFromInput !== undefined) return documentWriteMode(writeModeOrDerivedFrom);
+    if (typeof writeModeOrDerivedFrom === "object") return "overwrite_current";
+    return documentWriteMode(writeModeOrDerivedFrom);
+  })();
+  const derivedFrom =
+    typeof writeModeOrDerivedFrom === "string" || derivedFromInput !== undefined
+      ? derivedFromInput
+      : writeModeOrDerivedFrom;
   if (derivedFrom) await validateFactDerivations(ctx, id, derivedFrom);
+  if (writeMode === "create_version") {
+    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
+    const currentObject = await ctx.env.DOCUMENTS.get(doc.r2Key);
+    if (!currentObject) throw new MemoryError(404, "document content not found");
+    const previousBytes = await currentObject.arrayBuffer();
+    await ctx.env.DOCUMENTS.put(historicalKey, previousBytes, {
+      httpMetadata: { contentType: doc.mimeType },
+      customMetadata: currentObject.customMetadata,
+    });
+    await db.insert(documentVersions).values({
+      id: createId("documentVersion"),
+      documentId: doc.id,
+      ownerId: doc.ownerId,
+      source: source(ctx),
+      versionNumber: doc.currentVersionNumber,
+      r2Key: historicalKey,
+      mimeType: doc.mimeType,
+      sizeBytes: doc.sizeBytes ?? previousBytes.byteLength,
+    });
+  }
   await markDownstreamStale(ctx, "document", id);
   const oldChunks = await db
     .select({ id: documentChunks.id })
@@ -2153,28 +2226,146 @@ export async function updateDocument(
   await ctx.env.DOCUMENTS.put(doc.r2Key, content, { httpMetadata: { contentType: doc.mimeType } });
   await db
     .update(documents)
-    .set({ sizeBytes: new TextEncoder().encode(content).byteLength, updatedAt: now() })
+    .set({
+      sizeBytes: new TextEncoder().encode(content).byteLength,
+      currentVersionNumber:
+        writeMode === "create_version" ? doc.currentVersionNumber + 1 : doc.currentVersionNumber,
+      updatedAt: now(),
+    })
     .where(eq(documents.id, id));
   if (derivedFrom) {
     await replaceDependencies(ctx, "document", id, "derived_from", []);
     await applyDocumentDerivations(ctx, id, derivedFrom);
   }
-  await insertChunks(ctx, id, content, doc.projectId);
+  if (isTextLikeMimeType(doc.mimeType)) {
+    await insertChunks(ctx, id, content, doc.projectId, doc.shared);
+  }
   return (await db.select().from(documents).where(eq(documents.id, id)))[0];
 }
 
 export async function getDocumentContent(ctx: Ctx, id: string) {
-  const doc = (
-    await createDb(ctx.env.DB)
-      .select()
-      .from(documents)
-      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
-      .limit(1)
-  )[0];
-  if (!doc) throw new MemoryError(404, "document not found");
+  const doc = await getReadableDocument(ctx, id);
   const object = await ctx.env.DOCUMENTS.get(doc.r2Key);
   if (!object) throw new MemoryError(404, "document content not found");
   return { doc, content: await object.text() };
+}
+
+export async function listDocumentVersions(ctx: Ctx, documentId: string) {
+  const doc = await getReadableDocument(ctx, documentId);
+  const historical = await createDb(ctx.env.DB)
+    .select()
+    .from(documentVersions)
+    .where(eq(documentVersions.documentId, doc.id))
+    .orderBy(desc(documentVersions.versionNumber));
+  return [
+    {
+      document_id: doc.id,
+      version_number: doc.currentVersionNumber,
+      is_current: true,
+      mime_type: doc.mimeType,
+      size_bytes: doc.sizeBytes,
+      created_at: doc.updatedAt,
+      source: doc.source,
+    },
+    ...historical.map((version) => ({
+      ...safeVersionMetadata(version),
+      document_id: version.documentId,
+      version_number: version.versionNumber,
+      mime_type: version.mimeType,
+      size_bytes: version.sizeBytes,
+      created_at: version.createdAt,
+      is_current: false,
+    })),
+  ];
+}
+
+async function getHistoricalDocumentVersion(
+  ctx: Ctx,
+  documentId: string,
+  selector: { version_id?: string; version_number?: number },
+) {
+  const doc = await getReadableDocument(ctx, documentId);
+  const filters = [eq(documentVersions.documentId, doc.id)];
+  if (selector.version_id) filters.push(eq(documentVersions.id, selector.version_id));
+  else if (selector.version_number !== undefined)
+    filters.push(eq(documentVersions.versionNumber, selector.version_number));
+  else throw new MemoryError(400, "missing version selector");
+  const version = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(documentVersions)
+      .where(and(...filters))
+      .limit(1)
+  )[0];
+  if (!version) throw new MemoryError(404, "document version not found");
+  return { doc, version };
+}
+
+export async function getDocumentVersionBytes(
+  ctx: Ctx,
+  documentId: string,
+  selector: { version_id?: string; version_number?: number },
+) {
+  const { version } = await getHistoricalDocumentVersion(ctx, documentId, selector);
+  const object = await ctx.env.DOCUMENTS.get(version.r2Key);
+  if (!object) throw new MemoryError(404, "document version content not found");
+  return {
+    version: safeVersionMetadata(version),
+    bytes: await object.arrayBuffer(),
+    filename: object.customMetadata?.filename,
+  };
+}
+
+export async function getDocumentVersionContent(
+  ctx: Ctx,
+  documentId: string,
+  selector: { version_id?: string; version_number?: number },
+) {
+  const { version } = await getHistoricalDocumentVersion(ctx, documentId, selector);
+  if (!isTextLikeMimeType(version.mimeType)) {
+    throw new MemoryError(400, "document version is not text-like; use download route");
+  }
+  const object = await ctx.env.DOCUMENTS.get(version.r2Key);
+  if (!object) throw new MemoryError(404, "document version content not found");
+  return { version: safeVersionMetadata(version), content: await object.text() };
+}
+
+export async function getDocumentVersionForMcp(
+  ctx: Ctx,
+  input: { document_id: string; version_id?: string; version_number?: number },
+) {
+  const selector = input.version_id
+    ? { version_id: input.version_id }
+    : input.version_number !== undefined
+      ? { version_number: Number(input.version_number) }
+      : undefined;
+  if (!selector) throw new MemoryError(400, "version_id or version_number is required");
+  const { version } = await getHistoricalDocumentVersion(ctx, input.document_id, selector);
+  const metadata = {
+    ...safeVersionMetadata(version),
+    document_id: version.documentId,
+    version_number: version.versionNumber,
+    mime_type: version.mimeType,
+    size_bytes: version.sizeBytes,
+    created_at: version.createdAt,
+  };
+  if (isTextLikeMimeType(version.mimeType)) {
+    const object = await ctx.env.DOCUMENTS.get(version.r2Key);
+    if (!object) throw new MemoryError(404, "document version content not found");
+    return { metadata, content: await object.text() };
+  }
+  const versionRef = version.id;
+  return {
+    metadata,
+    content: null,
+    download: {
+      url: `/api/v1/documents/${input.document_id}/versions/${versionRef}/download`,
+      method: "GET",
+      headers: { Authorization: "Bearer <your existing brainfog bearer token>" },
+      notes:
+        "This historical version is not text-like. Download exact bytes via the authenticated REST route; no file bytes or bearer token value are returned through MCP.",
+    },
+  };
 }
 
 export async function recordTimeSeriesPoints(
@@ -2593,6 +2784,10 @@ export async function deleteDocument(ctx: Ctx, id: string) {
     .select({ id: documentChunks.id })
     .from(documentChunks)
     .where(eq(documentChunks.documentId, id));
+  const versionRows = await db
+    .select({ r2Key: documentVersions.r2Key })
+    .from(documentVersions)
+    .where(eq(documentVersions.documentId, id));
   await cleanDocumentChunkGraphEdges(
     ctx,
     id,
@@ -2603,6 +2798,7 @@ export async function deleteDocument(ctx: Ctx, id: string) {
     chunkIds.map((c) => c.id),
   );
   await ctx.env.DOCUMENTS.delete(doc.r2Key);
+  await Promise.all(versionRows.map((version) => ctx.env.DOCUMENTS.delete(version.r2Key)));
   await deleteGraphEdgesTouching(ctx, id);
   await db.delete(documents).where(eq(documents.id, id));
   return { ok: true };
