@@ -11,10 +11,13 @@ import {
   createUserToken,
   getDocumentBytes,
   getDocumentContent,
+  getDocumentVersionBytes,
+  getDocumentVersionContent,
   getEntity,
   getEntityRelations,
   getMetrics,
   getSummary,
+  listDocumentVersions,
   listProjects,
   listUsers,
   listUserTokens,
@@ -318,6 +321,17 @@ function param(c: AppContext, name: string) {
   const value = c.req.param(name);
   if (!value) throw new MemoryError(400, `missing ${name}`);
   return value;
+}
+
+function versionSelector(value: string) {
+  const n = Number(value);
+  if (Number.isInteger(n) && n > 0) return { version_number: n };
+  return { version_id: value };
+}
+
+function safeDownloadFilename(value: string) {
+  const sanitized = value.replace(/[\\/\0\r\n";]/g, "_").trim();
+  return sanitized || "document-version";
 }
 
 function parseQueries(value: string | undefined) {
@@ -1408,6 +1422,110 @@ appRoutes.get("/documents/:id", async (c: AppContext) => {
     if (error instanceof MemoryError) {
       return c.html(errorPageContent(user, "Error", error.message), errorStatus(error.status));
     }
+    throw error;
+  }
+});
+
+// GET /app/documents/:id/versions/:version/content - Historical document version reader
+appRoutes.get("/documents/:id/versions/:version/content", async (c: AppContext) => {
+  const user = c.get("user");
+  try {
+    const docId = param(c, "id");
+    const versionParam = param(c, "version");
+    const ctx = memCtx(c);
+    const selector = versionSelector(versionParam);
+    const versions = await listDocumentVersions(ctx, docId);
+    const selected = versions.find((version) => {
+      if ("version_number" in selector) return version.version_number === selector.version_number;
+      return "id" in version && version.id === selector.version_id;
+    });
+    if (!selected || selected.is_current) throw new MemoryError(404, "document version not found");
+    const document = await getEntity(ctx, "documents", docId);
+    const mime = String(selected.mime_type ?? document.mimeType ?? "application/octet-stream");
+    c.header("Cache-Control", "no-store");
+    if (!isTextMime(mime)) {
+      return c.html(
+        <Layout user={user} currentPath="/app/documents">
+          <p>
+            <a href={`/app/browser/documents/${docId}`}>← Back to document details</a>
+          </p>
+          <h2>
+            {document.title as string} — version {String(selected.version_number)}
+          </h2>
+          <div class="metadata">
+            <div>Status: historical</div>
+            <div>MIME type: {mime}</div>
+            <div>Size: {String(selected.size_bytes ?? "—")} bytes</div>
+            <div>Date: {fmtDate(selected.created_at as Date | undefined)}</div>
+          </div>
+          <p>
+            This historical version is not text-like.{" "}
+            <a
+              href={`/app/documents/${docId}/versions/${String(selected.version_number)}/download`}
+            >
+              Download exact bytes
+            </a>
+            .
+          </p>
+        </Layout>,
+      );
+    }
+    const result = await getDocumentVersionContent(ctx, docId, selector);
+    return c.html(
+      <Layout user={user} currentPath="/app/documents">
+        <p>
+          <a href={`/app/browser/documents/${docId}`}>← Back to document details</a>
+        </p>
+        <h2>
+          {document.title as string} — version {String(selected.version_number)}
+        </h2>
+        <div class="metadata">
+          <div>Status: historical</div>
+          <div>MIME type: {mime}</div>
+          <div>Size: {String(selected.size_bytes ?? "—")} bytes</div>
+          <div>Date: {fmtDate(selected.created_at as Date | undefined)}</div>
+          <div>
+            <a
+              href={`/app/documents/${docId}/versions/${String(selected.version_number)}/download`}
+            >
+              Download
+            </a>
+          </div>
+        </div>
+        <h3>Content</h3>
+        {isMarkdown(mime) ? (
+          <article class="content">{raw(markdownToHtml(result.content))}</article>
+        ) : (
+          <pre>{escapeHtml(result.content)}</pre>
+        )}
+      </Layout>,
+    );
+  } catch (error) {
+    if (error instanceof MemoryError) {
+      return c.html(errorPageContent(user, "Error", error.message), errorStatus(error.status));
+    }
+    throw error;
+  }
+});
+
+// GET /app/documents/:id/versions/:version/download - Historical exact-byte download
+appRoutes.get("/documents/:id/versions/:version/download", async (c: AppContext) => {
+  try {
+    const ctx = memCtx(c);
+    const docId = param(c, "id");
+    const result = await getDocumentVersionBytes(ctx, docId, versionSelector(param(c, "version")));
+    const filename = safeDownloadFilename(
+      result.filename ?? `${docId}-v${result.version.versionNumber}`,
+    );
+    return c.body(result.bytes, 200, {
+      "Cache-Control": "no-store",
+      "Content-Type": result.version.mimeType || "application/octet-stream",
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "Content-Length": String(result.bytes.byteLength),
+      "X-Content-Type-Options": "nosniff",
+    });
+  } catch (error) {
+    if (error instanceof MemoryError) return c.text(error.message, errorStatus(error.status));
     throw error;
   }
 });

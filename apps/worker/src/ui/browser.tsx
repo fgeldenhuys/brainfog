@@ -9,9 +9,11 @@ import {
   browseEntities,
   createProject,
   createTask,
+  type DocumentWriteMode,
   deleteDocument,
   deleteFact,
   deleteThought,
+  documentWriteModes,
   getDocumentContent,
   getEntity,
   getEntityRelations,
@@ -19,6 +21,7 @@ import {
   graphKinds,
   isBrowserKind,
   labelForEntity,
+  listDocumentVersions,
   listProjects,
   MemoryError,
   recordFact,
@@ -203,6 +206,12 @@ function req(form: Record<string, string>, key: string): string {
   const value = form[key];
   if (!value) throw new MemoryError(400, `missing ${key}`);
   return value;
+}
+
+function documentWriteModeFromForm(form: Record<string, string>): DocumentWriteMode {
+  const value = form.write_mode ?? "overwrite_current";
+  if ((documentWriteModes as readonly string[]).includes(value)) return value as DocumentWriteMode;
+  throw new MemoryError(400, "invalid document write_mode");
 }
 
 function str(form: Record<string, string>, key: string): string | undefined {
@@ -781,6 +790,28 @@ function renderEditForm(
     case "documents":
       return (
         <form method="post" action={action}>
+          <fieldset>
+            <legend>Save mode</legend>
+            <label>
+              <input
+                type="radio"
+                name="write_mode"
+                value="overwrite_current"
+                checked
+                style={{ width: "auto" }}
+              />{" "}
+              Overwrite current content without preserving history
+            </label>
+            <label>
+              <input
+                type="radio"
+                name="write_mode"
+                value="create_version"
+                style={{ width: "auto" }}
+              />{" "}
+              Preserve current content as a historical version before saving
+            </label>
+          </fieldset>
           <label htmlFor="content">Content</label>
           <textarea name="content" id="content" required>
             {documentContent ?? ""}
@@ -996,7 +1027,7 @@ browserRoutes.post(
         });
         break;
       case "documents":
-        await updateDocument(ctx, id, req(form, "content"));
+        await updateDocument(ctx, id, req(form, "content"), documentWriteModeFromForm(form));
         break;
     }
     return c.redirect(`/app/browser/${kind}/${id}`);
@@ -1131,6 +1162,8 @@ browserRoutes.get(
         supersededByLabel = await labelForEntity(ctx, "fact", row.supersededByFactId as string);
     }
 
+    const versions = kind === "documents" ? await listDocumentVersions(ctx, id) : null;
+
     return c.html(
       <Layout user={c.get("user")} currentPath={c.req.path}>
         <p>
@@ -1167,6 +1200,58 @@ browserRoutes.get(
         />
         <h3>Related</h3>
         <RelationsList relations={relations} />
+        {kind === "documents" && versions ? (
+          <div class="card">
+            <h3>Versions</h3>
+            <p>Recall and chunks use the current document content only.</p>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Version</th>
+                    <th>Status</th>
+                    <th>MIME</th>
+                    <th>Size</th>
+                    <th>Date</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {versions.map((version) => {
+                    const versionNumber = version.version_number as number;
+                    const isCurrent = Boolean(version.is_current);
+                    return (
+                      <tr key={`${isCurrent ? "current" : "historical"}-${versionNumber}`}>
+                        <td>{versionNumber}</td>
+                        <td>{isCurrent ? "current" : "historical"}</td>
+                        <td>{String(version.mime_type ?? "—")}</td>
+                        <td>{version.size_bytes == null ? "—" : `${version.size_bytes} bytes`}</td>
+                        <td>{fmtDate(version.created_at as Date | null | undefined)}</td>
+                        <td>
+                          {isCurrent ? (
+                            <>
+                              <a href={`/app/documents/${id}`}>View</a>{" "}
+                              <a href={`/app/documents/${id}/raw`}>Raw</a>
+                            </>
+                          ) : (
+                            <>
+                              <a href={`/app/documents/${id}/versions/${versionNumber}/content`}>
+                                View
+                              </a>{" "}
+                              <a href={`/app/documents/${id}/versions/${versionNumber}/download`}>
+                                Download
+                              </a>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        ) : null}
         <div class="button-group">
           {EDITABLE_KINDS.has(kind) ? <a href={`/app/browser/${kind}/${id}/edit`}>Edit</a> : null}
           {DELETABLE_KINDS.has(kind) ? (

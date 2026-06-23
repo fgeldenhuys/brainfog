@@ -1,6 +1,8 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
 import {
   createDb,
+  documents,
+  documentVersions,
   ingestionConnectors,
   ingestionRuns,
   pageAccessLinks,
@@ -372,6 +374,137 @@ describe("authenticated UI pages", () => {
       headers: cookie(USER_TOKEN),
     });
     expect(crossOwner.status).toBe(404);
+  });
+
+  it("exposes browser document write modes and creates historical versions on request", async () => {
+    const ctx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:ui-versions",
+    };
+    const document = await addDocument(ctx, {
+      title: "Versioned UI Doc",
+      mime_type: "text/markdown",
+      content: "# Previous UI Version\n\nold-version-secret-024",
+    });
+
+    const edit = await SELF.fetch(`https://example.com/app/browser/documents/${document.id}/edit`, {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(edit.status).toBe(200);
+    const editHtml = await edit.text();
+    expect(editHtml).toContain('name="write_mode"');
+    expect(editHtml).toContain('value="overwrite_current"');
+    expect(editHtml).toContain('value="create_version"');
+
+    const saved = await SELF.fetch(
+      `https://example.com/app/browser/documents/${document.id}/edit`,
+      {
+        method: "POST",
+        headers: { ...cookie(ADMIN_TOKEN), "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          write_mode: "create_version",
+          content: "# Current UI Version\n\nnew-current-024",
+        }).toString(),
+        redirect: "manual",
+      },
+    );
+    expect(saved.status).toBe(302);
+
+    const current = await SELF.fetch(`https://example.com/app/documents/${document.id}/raw`, {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(await current.text()).toContain("new-current-024");
+
+    const detail = await SELF.fetch(`https://example.com/app/browser/documents/${document.id}`, {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(detail.status).toBe(200);
+    const detailHtml = await detail.text();
+    expect(detailHtml).toContain("Versions");
+    expect(detailHtml).toContain("current");
+    expect(detailHtml).toContain("historical");
+    expect(detailHtml).toContain(`/app/documents/${document.id}/versions/1/content`);
+    expect(detailHtml).not.toContain("r2Key");
+    const db = createDb(env.DB);
+    const docRow = (await db.select().from(documents).where(eq(documents.id, document.id)))[0];
+    const versionRow = (
+      await db.select().from(documentVersions).where(eq(documentVersions.documentId, document.id))
+    )[0];
+    expect(docRow).toBeTruthy();
+    expect(versionRow).toBeTruthy();
+    if (!docRow || !versionRow) throw new Error("expected document and version rows");
+    expect(detailHtml).not.toContain(docRow.r2Key);
+    expect(detailHtml).not.toContain(versionRow.r2Key);
+
+    const unauthenticated = await SELF.fetch(
+      `https://example.com/app/documents/${document.id}/versions/1/content`,
+      { redirect: "manual" },
+    );
+    expect(unauthenticated.status).toBe(302);
+
+    const historical = await SELF.fetch(
+      `https://example.com/app/documents/${document.id}/versions/1/content`,
+      { headers: cookie(ADMIN_TOKEN) },
+    );
+    expect(historical.status).toBe(200);
+    expect(historical.headers.get("cache-control")).toBe("no-store");
+    const historicalHtml = await historical.text();
+    expect(historicalHtml).toContain("Previous UI Version");
+    expect(historicalHtml).toContain("old-version-secret-024");
+    expect(historicalHtml).not.toContain("new-current-024");
+
+    const download = await SELF.fetch(
+      `https://example.com/app/documents/${document.id}/versions/1/download`,
+      { headers: cookie(ADMIN_TOKEN) },
+    );
+    expect(download.status).toBe(200);
+    expect(download.headers.get("cache-control")).toBe("no-store");
+    expect(download.headers.get("content-disposition")).toMatch(/attachment/);
+    expect(await download.text()).toContain("old-version-secret-024");
+
+    const currentAfterHistoryRead = await SELF.fetch(
+      `https://example.com/app/documents/${document.id}/raw`,
+      { headers: cookie(ADMIN_TOKEN) },
+    );
+    expect(await currentAfterHistoryRead.text()).toContain("new-current-024");
+  });
+
+  it("keeps browser overwrite_current edits out of version history", async () => {
+    const ctx = {
+      env,
+      user: { id: ADMIN_ID, name: "UI Admin", slug: "ui-admin", isAdmin: true },
+      source: "test:ui-overwrite",
+    };
+    const document = await addDocument(ctx, {
+      title: "Overwrite UI Doc",
+      mime_type: "text/plain",
+      content: "overwrite before 024",
+    });
+
+    const saved = await SELF.fetch(
+      `https://example.com/app/browser/documents/${document.id}/edit`,
+      {
+        method: "POST",
+        headers: { ...cookie(ADMIN_TOKEN), "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          write_mode: "overwrite_current",
+          content: "overwrite after 024",
+        }).toString(),
+        redirect: "manual",
+      },
+    );
+    expect(saved.status).toBe(302);
+
+    const versions = await createDb(env.DB)
+      .select()
+      .from(documentVersions)
+      .where(eq(documentVersions.documentId, document.id));
+    expect(versions).toHaveLength(0);
+    const raw = await SELF.fetch(`https://example.com/app/documents/${document.id}/raw`, {
+      headers: cookie(ADMIN_TOKEN),
+    });
+    expect(await raw.text()).toBe("overwrite after 024");
   });
 
   it("renders recall search results through the existing recall service", async () => {
