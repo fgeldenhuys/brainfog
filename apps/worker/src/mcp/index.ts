@@ -17,6 +17,8 @@ import {
 import {
   addDocument,
   createDependency,
+  createDocumentDownloadLink,
+  createDocumentUploadLink,
   createProject,
   createTask,
   deleteDependency,
@@ -248,6 +250,31 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           String(args.id),
           String(args.content),
           args.derived_from as Parameters<typeof updateDocument>[3],
+        ),
+    );
+    register(
+      "create_document_upload_link",
+      "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never through MCP tool arguments or outputs.",
+      {
+        title: z.string(),
+        filename: z.string().optional(),
+        mime_type: z.string().optional(),
+        project_id: z.string().optional(),
+      },
+      (args) =>
+        createDocumentUploadLink(
+          this.memoryCtx(),
+          args as Parameters<typeof createDocumentUploadLink>[1],
+        ),
+    );
+    register(
+      "create_document_download_link",
+      "Create authenticated REST download instructions for an owned document. File bytes are transferred over HTTP, never returned inline through MCP.",
+      { document_id: z.string(), filename: z.string().optional() },
+      (args) =>
+        createDocumentDownloadLink(
+          this.memoryCtx(),
+          args as Parameters<typeof createDocumentDownloadLink>[1],
         ),
     );
     register(

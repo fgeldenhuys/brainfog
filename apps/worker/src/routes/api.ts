@@ -17,6 +17,7 @@ import {
 import {
   addDocument,
   createDependency,
+  createDocumentFromBytes,
   createProject,
   createTask,
   deleteDependency,
@@ -24,6 +25,7 @@ import {
   deleteFact,
   deleteThought,
   getChunksForDocument,
+  getDocumentBytes,
   getDocumentContent,
   linkThought,
   listDependencies,
@@ -188,6 +190,30 @@ apiRoutes.post(
     c.json(await addDocument(ctx(c), (await body(c)) as { title: string; content: string }), 201),
   ),
 );
+apiRoutes.post(
+  "/documents/direct-upload",
+  route(async (c) => {
+    const title = c.req.query("title") ?? c.req.header("x-brainfog-document-title") ?? "";
+    const mimeType =
+      c.req.query("mime_type") ??
+      c.req.header("x-brainfog-mime-type") ??
+      c.req.header("content-type");
+    const projectId =
+      c.req.query("project_id") ?? c.req.header("x-brainfog-project-id") ?? undefined;
+    const filename = c.req.query("filename") ?? c.req.header("x-brainfog-filename") ?? undefined;
+    const bytes = await c.req.arrayBuffer();
+    return c.json(
+      await createDocumentFromBytes(ctx(c), {
+        title,
+        bytes,
+        project_id: projectId,
+        mime_type: mimeType,
+        filename,
+      }),
+      201,
+    );
+  }),
+);
 apiRoutes.patch(
   "/documents/:id",
   route(async (c) => {
@@ -217,6 +243,27 @@ apiRoutes.get(
     return new Response(result.content, { headers: { "content-type": result.doc.mimeType } });
   }),
 );
+apiRoutes.get(
+  "/documents/:id/download",
+  route(async (c) => {
+    const result = await getDocumentBytes(ctx(c), param(c, "id"));
+    const filename = safeDownloadFilename(
+      c.req.query("filename") ?? result.filename ?? result.doc.title,
+    );
+    return new Response(result.bytes, {
+      headers: {
+        "content-type": result.doc.mimeType || "application/octet-stream",
+        "content-disposition": `attachment; filename="${filename}"`,
+        "content-length": String(result.bytes.byteLength),
+        "x-content-type-options": "nosniff",
+      },
+    });
+  }),
+);
+
+function safeDownloadFilename(value: string) {
+  return value.replace(/[\\/\r\n\0"]/g, "_").trim() || "document";
+}
 
 apiRoutes.get(
   "/time-series-points",

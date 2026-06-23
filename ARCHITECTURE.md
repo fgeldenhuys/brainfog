@@ -49,7 +49,7 @@ Claude / OpenCode                          claude.ai
 7. **One hosted environment.** Brainfog has no separate hosted dev/staging/preview Cloudflare environment in the early stages. Local development uses Wrangler/Miniflare to emulate Workers, D1, Vectorize, Workers AI, and Durable Objects. Any configured Cloudflare resource is treated as the single production target until an ADR introduces environment separation.
 8. **Worker API contracts are additive within a version.** REST routes live under `/api/v1/`; fields may be added but not removed or renamed without a new version once clients depend on them.
 9. **Secrets never live in committed files.** Local secrets live in ignored `.dev.vars`; production secrets are Wrangler-managed. `.dev.vars.example` documents required variable names without real values.
-10. **Memory content is text/structured JSON, plus R2-stored documents, in v1.** `documents` (Markdown, stored in R2 — ADR-008) is the one exception to "text/JSON in D1". No other binary or large media (images, audio, arbitrary file attachments) is stored. Expanding beyond Markdown documents requires a new ADR.
+10. **Memory content is text/structured JSON, plus R2-stored documents, in v1.** `documents` are stored in R2 (ADR-008). Text-like documents are chunked and indexed for recall; opaque backup/restore files may also be stored as exact bytes without semantic chunks or embeddings (ADR-013). No other rich media domain (images, audio, video, arbitrary media indexing) is in scope without a new ADR.
 
 ## Boundaries
 
@@ -62,7 +62,7 @@ Claude / OpenCode                          claude.ai
 ## Non-Goals
 
 - Public or multi-tenant signup.
-- Rich media storage (images, audio, binary file attachments). Markdown documents via R2 (ADR-008) are in scope; other media types are not.
+- Rich media storage or indexing (images, audio, video, arbitrary media extraction). R2-backed documents are in scope for text recall (ADR-008) and opaque backup/restore bytes (ADR-013); rich media semantics are not.
 - Ingesting or archiving full chat transcripts as a primary feature.
 - Acting as a replacement for a project's own specs, ADRs, or PBIs.
 - Real-time collaboration/presence features. (ADR-011's `shared`-visibility model — `specs/sharing/spec.md` — is asynchronous, read-only cross-user visibility, not live multi-user editing or presence, and stays within this non-goal.)

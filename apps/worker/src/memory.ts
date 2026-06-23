@@ -1875,6 +1875,185 @@ export async function addDocument(
   return row;
 }
 
+const directDocumentUploadMaxBytes = 25 * 1024 * 1024;
+
+function isTextLikeMimeType(mimeType: string) {
+  const value = mimeType.toLowerCase().split(";")[0]?.trim() ?? "";
+  return (
+    value.startsWith("text/") ||
+    [
+      "application/json",
+      "application/ld+json",
+      "application/markdown",
+      "application/xml",
+      "application/yaml",
+      "application/x-yaml",
+      "application/javascript",
+      "application/typescript",
+      "image/svg+xml",
+    ].includes(value) ||
+    value.endsWith("+json") ||
+    value.endsWith("+xml")
+  );
+}
+
+function decodeUtf8(bytes: ArrayBuffer) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch (_error) {
+    throw new MemoryError(400, "text-like document bytes must be valid UTF-8");
+  }
+}
+
+function validateMimeType(mimeType: string | null | undefined): string {
+  if (!mimeType) return "application/octet-stream";
+  const trimmed = mimeType.trim();
+  if (!trimmed) return "application/octet-stream";
+  if (trimmed.length > 200) throw new MemoryError(400, "MIME type exceeds 200 characters");
+  if (trimmed.length > 0 && [...trimmed].some((ch) => ch < " " || ch === "\x7f"))
+    throw new MemoryError(400, "MIME type contains control characters");
+  if (!trimmed.includes("/")) throw new MemoryError(400, "MIME type must have type/subtype format");
+  if (trimmed.includes('"')) throw new MemoryError(400, "MIME type must not contain double quotes");
+  return trimmed;
+}
+
+function safeFilename(value?: string | null) {
+  const cleaned = (value ?? "document").replace(/[\\/\r\n\0"]/g, "_").trim();
+  return cleaned || "document";
+}
+
+export async function createDocumentFromBytes(
+  ctx: Ctx,
+  input: {
+    title: string;
+    bytes: ArrayBuffer;
+    project_id?: string | null;
+    mime_type?: string | null;
+    filename?: string | null;
+  },
+) {
+  const title = input.title.trim();
+  if (!title) throw new MemoryError(400, "missing title");
+  if (input.bytes.byteLength > directDocumentUploadMaxBytes) {
+    throw new MemoryError(400, "document upload exceeds 25 MiB limit");
+  }
+  await ensureProject(ctx, input.project_id);
+  const db = createDb(ctx.env.DB);
+  const id = createId("document");
+  const mimeType = validateMimeType(input.mime_type);
+  // Decode text-like content before persisting to R2/D1 so invalid UTF-8
+  // fails with 400 and leaves no stored state.
+  let decodedText: string | undefined;
+  if (isTextLikeMimeType(mimeType)) {
+    decodedText = decodeUtf8(input.bytes);
+  }
+  const extension = isTextLikeMimeType(mimeType) ? ".txt" : ".bin";
+  const r2Key = `${ctx.user.id}/${id}${extension}`;
+  await ctx.env.DOCUMENTS.put(r2Key, input.bytes, {
+    httpMetadata: { contentType: mimeType },
+    customMetadata: input.filename ? { filename: safeFilename(input.filename) } : undefined,
+  });
+  const row = {
+    id,
+    ownerId: ctx.user.id,
+    projectId: input.project_id ?? null,
+    source: source(ctx),
+    title,
+    r2Key,
+    mimeType,
+    sizeBytes: input.bytes.byteLength,
+  };
+  await db.insert(documents).values(row);
+  if (decodedText !== undefined) {
+    await insertChunks(ctx, id, decodedText, input.project_id ?? null);
+  }
+  const cascaded = await applyProjectContagion(ctx, "document", row.id, row.projectId);
+  if (cascaded.length > 0) return { ...row, cascaded };
+  return row;
+}
+
+export async function getDocumentBytes(ctx: Ctx, id: string) {
+  const doc = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, id), eq(documents.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  if (!doc) throw new MemoryError(404, "document not found");
+  const object = await ctx.env.DOCUMENTS.get(doc.r2Key);
+  if (!object) throw new MemoryError(404, "document content not found");
+  return { doc, bytes: await object.arrayBuffer(), filename: object.customMetadata?.filename };
+}
+
+function transferPath(path: string, params: Record<string, string | undefined>) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") query.set(key, value);
+  }
+  const suffix = query.toString();
+  return suffix ? `${path}?${suffix}` : path;
+}
+
+export async function createDocumentUploadLink(
+  ctx: Ctx,
+  input: { title: string; filename?: string; mime_type?: string; project_id?: string },
+) {
+  if (!input.title?.trim()) throw new MemoryError(400, "missing title");
+  await ensureProject(ctx, input.project_id);
+  const mimeType = validateMimeType(input.mime_type);
+  const path = transferPath("/api/v1/documents/direct-upload", {
+    title: input.title,
+    filename: input.filename,
+    mime_type: mimeType,
+    project_id: input.project_id,
+  });
+  return {
+    url: path,
+    method: "POST",
+    headers: {
+      Authorization: "Bearer <your existing brainfog bearer token>",
+      "Content-Type": mimeType,
+    },
+    expires_at: null,
+    max_size_bytes: directDocumentUploadMaxBytes,
+    notes:
+      "Upload raw file bytes to this authenticated REST endpoint. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
+    command_example:
+      'curl -X POST "$BRAINFOG_BASE_URL/api/v1/documents/direct-upload?title=<title>&mime_type=<mime-type>&filename=<filename>" -H "Authorization: Bearer $BRAINFOG_TOKEN" -H "Content-Type: <mime-type>" --data-binary @<path-to-file>',
+  };
+}
+
+export async function createDocumentDownloadLink(
+  ctx: Ctx,
+  input: { document_id: string; filename?: string },
+) {
+  const doc = (
+    await createDb(ctx.env.DB)
+      .select()
+      .from(documents)
+      .where(and(eq(documents.id, input.document_id), eq(documents.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  if (!doc) throw new MemoryError(404, "document not found");
+  const path = transferPath(`/api/v1/documents/${doc.id}/download`, {
+    filename: input.filename,
+  });
+  return {
+    url: path,
+    method: "GET",
+    headers: { Authorization: "Bearer <your existing brainfog bearer token>" },
+    expires_at: null,
+    document_id: doc.id,
+    mime_type: doc.mimeType,
+    size_bytes: doc.sizeBytes,
+    notes:
+      "Download raw document bytes from this authenticated REST endpoint. No file bytes or bearer token value are returned through MCP.",
+    command_example:
+      'curl -L "$BRAINFOG_BASE_URL/api/v1/documents/<document-id>/download?filename=<filename>" -H "Authorization: Bearer $BRAINFOG_TOKEN" -o <output-path>',
+  };
+}
+
 async function applyDocumentDerivations(
   ctx: Ctx,
   documentId: string,

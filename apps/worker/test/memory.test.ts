@@ -586,6 +586,89 @@ describe("memory model REST service", () => {
     ).toBe(0);
   });
 
+  it("direct text upload stores R2 bytes, chunks them, and supports recall", async () => {
+    const body = new TextEncoder().encode("Direct text upload has a recallable nebula keyword.");
+    const doc = await json<{ id: string; r2Key: string; source: string; ownerId: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=Direct%20Text&mime_type=text%2Fplain&filename=direct.txt",
+        {
+          method: "POST",
+          headers: { "content-type": "text/plain" },
+          body,
+        },
+      ),
+    );
+    expect(doc.ownerId).toBe("user-memory-a");
+    expect(doc.source).toBe("rest:api");
+    expect(doc.r2Key).toContain(`${doc.id}.txt`);
+
+    const chunks = await json<{ id: string; content: string }[]>(
+      await authFetch(`/api/v1/documents/${doc.id}/chunks`),
+    );
+    expect(chunks.length).toBeGreaterThan(0);
+    expect(chunks[0]?.content).toContain("nebula keyword");
+
+    const recalled = await json<{ kind: string; row: { document?: { id: string } } }[]>(
+      await authFetch("/api/v1/recall?q=nebula%20keyword&kinds=document_chunk"),
+    );
+    expect(recalled.some((r) => r.kind === "document_chunk" && r.row.document?.id === doc.id)).toBe(
+      true,
+    );
+  });
+
+  it("direct binary upload creates no chunks and downloads exact bytes with owner scoping", async () => {
+    const bytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0, 255, 1, 2, 3, 4]);
+    const doc = await json<{ id: string; mimeType: string; sizeBytes: number }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=Archive&mime_type=application%2Fzip&filename=backup.zip",
+        {
+          method: "POST",
+          headers: { "content-type": "application/zip" },
+          body: bytes,
+        },
+      ),
+    );
+    expect(doc.mimeType).toBe("application/zip");
+    expect(doc.sizeBytes).toBe(bytes.byteLength);
+    expect(
+      (
+        await createDb(env.DB)
+          .select()
+          .from(documentChunks)
+          .where(eq(documentChunks.documentId, doc.id))
+      ).length,
+    ).toBe(0);
+
+    const denied = await authFetch(`/api/v1/documents/${doc.id}/download`, {}, TOKEN_B);
+    expect(denied.status).toBe(404);
+
+    const download = await authFetch(`/api/v1/documents/${doc.id}/download`);
+    expect(download.status).toBe(200);
+    expect(download.headers.get("content-type")).toContain("application/zip");
+    expect(download.headers.get("content-disposition")).toContain("attachment");
+    expect(download.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+  });
+
+  it("direct upload validates project ownership", async () => {
+    const otherProject = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/projects",
+        { method: "POST", body: JSON.stringify({ name: "Other project" }) },
+        TOKEN_B,
+      ),
+    );
+    const response = await authFetch(
+      `/api/v1/documents/direct-upload?title=Bad&project_id=${otherProject.id}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Uint8Array([1, 2, 3]),
+      },
+    );
+    expect(response.status).toBe(404);
+  });
+
   it("update_document preserves stale chunk-derived dependencies without dangling chunk edges", async () => {
     const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
     const doc = await addDocument(ctx, {
@@ -1048,6 +1131,8 @@ describe("memory model REST service", () => {
         "update_fact",
         "add_document",
         "update_document",
+        "create_document_upload_link",
+        "create_document_download_link",
         "recall",
         "create_task",
         "update_task",
@@ -2073,6 +2158,185 @@ describe("memory model REST service", () => {
         "set_shared",
       ]),
     );
+  });
+
+  it("MCP document transfer tools return authenticated REST instructions without bytes or tokens", async () => {
+    const upload = await callMcpTool<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      command_example: string;
+    }>("create_document_upload_link", {
+      title: "MCP Upload",
+      filename: "backup.zip",
+      mime_type: "application/zip",
+    });
+    expect(upload.method).toBe("POST");
+    expect(upload.url).toContain("/api/v1/documents/direct-upload");
+    expect(upload.headers.Authorization).toContain("<your existing brainfog bearer token>");
+    expect(upload.command_example).toContain("--data-binary @<path-to-file>");
+    // Static template never interpolates caller-supplied values
+    expect(upload.command_example).not.toContain("backup.zip");
+    expect(upload.command_example).not.toContain("application/zip");
+    expect(JSON.stringify(upload)).not.toContain(TOKEN_A);
+    expect(JSON.stringify(upload)).not.toContain("UEsDB");
+
+    const doc = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=MCP%20Download&mime_type=application%2Foctet-stream",
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: new Uint8Array([9, 8, 7]),
+        },
+      ),
+    );
+    const download = await callMcpTool<{
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      document_id: string;
+    }>("create_document_download_link", { document_id: doc.id, filename: "restore.bin" });
+    expect(download.method).toBe("GET");
+    expect(download.url).toContain(`/api/v1/documents/${doc.id}/download`);
+    expect(download.document_id).toBe(doc.id);
+    expect(download.headers.Authorization).toContain("<your existing brainfog bearer token>");
+    expect(JSON.stringify(download)).not.toContain(TOKEN_A);
+  });
+
+  it("MCP upload-link command_example is a static template and does not interpolate hostile values", async () => {
+    // Hostile filename with shell metacharacters — valid MIME type
+    const upload = await callMcpTool<{ command_example: string }>("create_document_upload_link", {
+      title: "Normal",
+      filename: '"; rm -rf /; echo "',
+      mime_type: "text/plain",
+    });
+    // command_example is a static template — no caller-controlled values appear
+    expect(upload.command_example).not.toContain("rm -rf");
+    expect(upload.command_example).toContain("<path-to-file>");
+    expect(upload.command_example).toContain("<mime-type>");
+    expect(upload.command_example).toContain("<title>");
+
+    // Shell backticks in filename
+    const upload2 = await callMcpTool<{ command_example: string }>("create_document_upload_link", {
+      title: "Normal",
+      filename: "`whoami`.txt",
+      mime_type: "text/plain",
+    });
+    expect(upload2.command_example).not.toContain("`whoami`");
+    expect(upload2.command_example).toContain("<path-to-file>");
+
+    // $(id) in title
+    const upload3 = await callMcpTool<{ command_example: string }>("create_document_upload_link", {
+      title: "$(id)",
+      filename: "file.txt",
+      mime_type: "text/plain",
+    });
+    expect(upload3.command_example).not.toContain("$(id)");
+    expect(upload3.command_example).toContain("<title>");
+
+    // No token leakage
+    expect(JSON.stringify(upload)).not.toContain(TOKEN_A);
+    expect(JSON.stringify(upload2)).not.toContain(TOKEN_A);
+    expect(JSON.stringify(upload3)).not.toContain(TOKEN_A);
+  });
+
+  it("MCP download-link command_example is also a safe static template", async () => {
+    // Create a document first so the tool succeeds
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "DL Template", content: "download template test" }),
+      }),
+    );
+    const download = await callMcpTool<{ command_example: string }>(
+      "create_document_download_link",
+      { document_id: doc.id, filename: "; rm -rf /; " },
+    );
+    expect(download.command_example).not.toContain("rm -rf");
+    expect(download.command_example).toContain("<output-path>");
+    expect(download.command_example).toContain("<document-id>");
+
+    // No token leakage
+    expect(JSON.stringify(download)).not.toContain(TOKEN_A);
+
+    // Cleanup
+    await authFetch(`/api/v1/documents/${doc.id}`, { method: "DELETE" });
+  });
+
+  it("direct upload rejects invalid MIME types with 400", async () => {
+    // MIME with double-quote injection attempt
+    const resp1 = await authFetch(
+      '/api/v1/documents/direct-upload?title=Bad&mime_type=text/plain";%20rm%20-rf',
+      {
+        method: "POST",
+        body: new Uint8Array([1, 2, 3]),
+      },
+    );
+    expect(resp1.status).toBe(400);
+
+    // MIME with control character
+    const resp2 = await authFetch(
+      "/api/v1/documents/direct-upload?title=Bad&mime_type=text/plain%00x",
+      {
+        method: "POST",
+        body: new Uint8Array([1, 2, 3]),
+      },
+    );
+    expect(resp2.status).toBe(400);
+
+    // MIME missing subtype (no slash)
+    const resp3 = await authFetch("/api/v1/documents/direct-upload?title=Bad&mime_type=text", {
+      method: "POST",
+      body: new Uint8Array([1, 2, 3]),
+    });
+    expect(resp3.status).toBe(400);
+
+    // Explicit valid MIME is still accepted
+    const resp4 = await authFetch(
+      "/api/v1/documents/direct-upload?title=Good&mime_type=text/plain",
+      {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("valid"),
+      },
+    );
+    expect(resp4.status).toBe(201);
+  });
+
+  it("invalid UTF-8 with text/plain returns 400 and creates no documents or chunks or R2 object", async () => {
+    const badBytes = new Uint8Array([0xff, 0xfe, 0x80, 0x00, 0x01]); // invalid UTF-8
+
+    const db = createDb(env.DB);
+    const beforeDocs = await db.select({ id: documents.id }).from(documents);
+    const beforeChunks = await db.select().from(documentChunks);
+    const beforeR2Keys = (await env.DOCUMENTS.list({ prefix: "user-memory-a/" })).objects.map(
+      (o) => o.key,
+    );
+
+    const response = await authFetch(
+      "/api/v1/documents/direct-upload?title=Bad%20UTF-8&mime_type=text%2Fplain",
+      {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: badBytes,
+      },
+    );
+    expect(response.status).toBe(400);
+
+    // No new document rows
+    const afterDocs = await db.select({ id: documents.id }).from(documents);
+    expect(afterDocs.length).toBe(beforeDocs.length);
+
+    // No new document_chunks rows
+    const afterChunks = await db.select().from(documentChunks);
+    expect(afterChunks.length).toBe(beforeChunks.length);
+
+    // No new R2 objects for user-memory-a
+    const afterR2Keys = (await env.DOCUMENTS.list({ prefix: "user-memory-a/" })).objects.map(
+      (o) => o.key,
+    );
+    expect(afterR2Keys).toEqual(beforeR2Keys);
   });
 
   it("time-series tool descriptions include agent guidance on convention, metadata, and recall", async () => {
