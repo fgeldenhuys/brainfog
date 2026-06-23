@@ -1,3 +1,5 @@
+import { createDb, documents } from "@brainfog/db";
+import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { raw } from "hono/html";
@@ -165,6 +167,25 @@ function metricBar(count: number, max: number) {
 function isMarkdown(mimeType?: string | null) {
   const type = (mimeType ?? "").toLowerCase();
   return type.includes("markdown") || type === "text/md" || type === "text/x-markdown";
+}
+
+function isTextMime(mimeType?: string | null) {
+  if (!mimeType) return true;
+  const type = mimeType.toLowerCase();
+  if (type.startsWith("text/")) return true;
+  if (type.startsWith("image/") || type.startsWith("audio/") || type.startsWith("video/"))
+    return false;
+  if (type.startsWith("application/")) {
+    const sub = type.slice(12);
+    if (
+      ["json", "xml", "yaml", "javascript", "ecmascript", "typescript"].some(
+        (t) => sub.includes(t) || sub === t,
+      )
+    )
+      return true;
+    return false;
+  }
+  return true;
 }
 
 async function usersWithTokens(ctx: ReturnType<typeof memCtx>) {
@@ -1324,15 +1345,23 @@ appRoutes.post("/tokens/:id/delete", async (c: AppContext) => {
   return c.redirect("/app/users");
 });
 
+// GET /app/documents - redirect to browser
+appRoutes.get("/documents", async (c: AppContext) => {
+  return c.redirect("/app/browser/documents");
+});
+
 // GET /app/documents/:id - Document reader
 appRoutes.get("/documents/:id", async (c: AppContext) => {
   const user = c.get("user");
   try {
     const docId = param(c, "id");
     const ctx = memCtx(c);
+    const textBody = isTextMime(
+      ((await getEntity(ctx, "documents", docId)).mimeType as string | null) ?? undefined,
+    );
     const [document, content, relations, projects] = await Promise.all([
       getEntity(ctx, "documents", docId),
-      getDocumentContent(ctx, docId),
+      textBody ? getDocumentContent(ctx, docId) : { content: "" },
       getEntityRelations(ctx, "documents", docId),
       listProjects(ctx),
     ]);
@@ -1363,10 +1392,16 @@ appRoutes.get("/documents/:id", async (c: AppContext) => {
         <h3>Dependencies</h3>
         <RelationsList relations={relations} />
         <h3>Content</h3>
-        {isMarkdown(document.mimeType as string | null) ? (
-          <article class="content">{raw(markdownToHtml(content.content))}</article>
+        {textBody ? (
+          isMarkdown(document.mimeType as string | null) ? (
+            <article class="content">{raw(markdownToHtml(content.content))}</article>
+          ) : (
+            <pre>{escapeHtml(content.content)}</pre>
+          )
         ) : (
-          <pre>{escapeHtml(content.content)}</pre>
+          <p>
+            Binary content — <a href={`/app/documents/${docId}/raw`}>download raw</a> to view.
+          </p>
         )}
       </Layout>,
     );
@@ -1381,11 +1416,33 @@ appRoutes.get("/documents/:id", async (c: AppContext) => {
 // GET /app/documents/:id/raw - Raw document content
 appRoutes.get("/documents/:id/raw", async (c: AppContext) => {
   try {
-    const content = await getDocumentContent(memCtx(c), param(c, "id"));
-    return c.text(content.content, 200, {
+    const ctx = memCtx(c);
+    const docId = param(c, "id");
+    const doc = (
+      await createDb(ctx.env.DB)
+        .select()
+        .from(documents)
+        .where(and(eq(documents.id, docId), eq(documents.ownerId, ctx.user.id)))
+        .limit(1)
+    )[0];
+    if (!doc) throw new MemoryError(404, "document not found");
+    const mime = (doc.mimeType ?? "application/octet-stream") as string;
+    const textBody = isTextMime(mime);
+    const object = await ctx.env.DOCUMENTS.get(doc.r2Key);
+    if (!object) throw new MemoryError(404, "document content not found");
+    if (textBody) {
+      return c.text(await object.text(), 200, {
+        "Cache-Control": "no-store",
+        "Content-Type": `${mime}; charset=utf-8`,
+      });
+    }
+    const headers: Record<string, string> = {
       "Cache-Control": "no-store",
-      "Content-Type": "text/plain; charset=utf-8",
-    });
+      "Content-Type": mime,
+      "Content-Disposition": `attachment; filename="${doc.id}"`,
+    };
+    if (object.size) headers["Content-Length"] = String(object.size);
+    return new Response(object.body, { status: 200, headers });
   } catch (error) {
     if (error instanceof MemoryError) return c.text(error.message, errorStatus(error.status));
     throw error;

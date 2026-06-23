@@ -365,7 +365,7 @@ describe("authenticated UI pages", () => {
       headers: cookie(ADMIN_TOKEN),
     });
     expect(raw.status).toBe(200);
-    expect(raw.headers.get("content-type")).toMatch(/text\/plain/);
+    expect(raw.headers.get("content-type")).toMatch(/text\/markdown/);
     expect(await raw.text()).toContain("<script>alert('x')</script>");
 
     const crossOwner = await SELF.fetch(`https://example.com/app/documents/${documentId}/raw`, {
