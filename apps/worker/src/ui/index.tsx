@@ -1,5 +1,3 @@
-import { createDb, documents } from "@brainfog/db";
-import { and, eq } from "drizzle-orm";
 import { Hono } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { raw } from "hono/html";
@@ -11,6 +9,7 @@ import { escapeHtml, markdownToHtml } from "../markdown";
 import {
   createUser,
   createUserToken,
+  getDocumentBytes,
   getDocumentContent,
   getEntity,
   getEntityRelations,
@@ -1418,31 +1417,22 @@ appRoutes.get("/documents/:id/raw", async (c: AppContext) => {
   try {
     const ctx = memCtx(c);
     const docId = param(c, "id");
-    const doc = (
-      await createDb(ctx.env.DB)
-        .select()
-        .from(documents)
-        .where(and(eq(documents.id, docId), eq(documents.ownerId, ctx.user.id)))
-        .limit(1)
-    )[0];
-    if (!doc) throw new MemoryError(404, "document not found");
-    const mime = (doc.mimeType ?? "application/octet-stream") as string;
-    const textBody = isTextMime(mime);
-    const object = await ctx.env.DOCUMENTS.get(doc.r2Key);
-    if (!object) throw new MemoryError(404, "document content not found");
-    if (textBody) {
-      return c.text(await object.text(), 200, {
+    const mime = ((await getEntity(ctx, "documents", docId)).mimeType ??
+      "application/octet-stream") as string;
+    if (isTextMime(mime)) {
+      const content = await getDocumentContent(ctx, docId);
+      return c.text(content.content, 200, {
         "Cache-Control": "no-store",
         "Content-Type": `${mime}; charset=utf-8`,
       });
     }
+    const content = await getDocumentBytes(ctx, docId);
     const headers: Record<string, string> = {
       "Cache-Control": "no-store",
       "Content-Type": mime,
-      "Content-Disposition": `attachment; filename="${doc.id}"`,
+      "Content-Disposition": `attachment; filename="${content.filename ?? docId}"`,
     };
-    if (object.size) headers["Content-Length"] = String(object.size);
-    return new Response(object.body, { status: 200, headers });
+    return c.body(content.bytes, 200, headers);
   } catch (error) {
     if (error instanceof MemoryError) return c.text(error.message, errorStatus(error.status));
     throw error;
