@@ -1,5 +1,6 @@
 import {
   createDb,
+  dependencyEdges,
   documentChunks,
   documents,
   facts,
@@ -13,7 +14,7 @@ import {
   users,
 } from "@brainfog/db";
 import { generateToken, hashToken } from "@brainfog/shared";
-import { and, desc, eq, gt, gte, isNull, like, lte, type SQL } from "drizzle-orm";
+import { and, desc, eq, gt, gte, inArray, isNull, like, lte, type SQL } from "drizzle-orm";
 import Mustache from "mustache";
 import { type DefaultTreeAdapterMap, parseFragment } from "parse5";
 import type { Env } from "./env";
@@ -78,6 +79,8 @@ const allowedTransforms = new Set([
   "count",
   "pivot_by_date",
   "pivot_by_year",
+  "pivot_by_activity",
+  "activity_notes",
 ]);
 const allowedTags = new Set([
   "section",
@@ -217,11 +220,23 @@ function validateTemplate(template: string, datasetNames: string[]) {
   } catch (error) {
     errors.push(`invalid mustache template: ${(error as Error).message}`);
   }
-  for (const match of template.matchAll(/{{[#^]\s*([\w.]+)\s*}}/g)) {
-    const name = (match[1] ?? "").split(".")[0] ?? "";
-    if (!datasetNames.includes(name) && !["page", "owner"].includes(name)) {
+  const sectionStack: string[] = [];
+  for (const match of template.matchAll(/{{\s*([#^/])\s*([\w.]+)\s*}}/g)) {
+    const marker = match[1];
+    const section = match[2] ?? "";
+    if (marker === "/") {
+      sectionStack.pop();
+      continue;
+    }
+    const name = section.split(".")[0] ?? "";
+    if (
+      sectionStack.length === 0 &&
+      !datasetNames.includes(name) &&
+      !["page", "owner"].includes(name)
+    ) {
       errors.push(`template references unknown section: ${name}`);
     }
+    sectionStack.push(section);
   }
   const fragment = parseFragment(template);
   const visit = (node: DefaultTreeAdapterMap["node"]) => {
@@ -362,6 +377,169 @@ function pivotByYear(rows: Record<string, unknown>[]): Record<string, unknown>[]
   return Array.from(buckets.values()); // already ordered Jan→Dec
 }
 
+function pivotByActivity(
+  rows: Record<string, unknown>[],
+  seriesPrefix?: string,
+): Record<string, unknown>[] {
+  const groups = new Map<string, Record<string, unknown>>();
+
+  for (const row of rows) {
+    const meta = row.metadata as Record<string, unknown> | undefined;
+
+    // Determine group key: metadata.activity_id > metadata.external_activity_id > observedAt ISO
+    let activityKey: string | undefined;
+    if (meta && typeof meta.activity_id === "string" && meta.activity_id) {
+      activityKey = meta.activity_id;
+    } else if (meta && typeof meta.external_activity_id === "string" && meta.external_activity_id) {
+      activityKey = meta.external_activity_id;
+    } else {
+      const dt = row.observedAt;
+      activityKey =
+        dt instanceof Date ? dt.toISOString() : typeof dt === "string" ? (iso(dt) ?? dt) : "";
+    }
+
+    if (!activityKey) continue;
+
+    if (!groups.has(activityKey)) {
+      groups.set(activityKey, { observedAt: row.observedAt, activity_sort_key: activityKey });
+    }
+
+    const group = groups.get(activityKey) ?? {};
+
+    // Determine suffix for numeric field names (same logic as pivotByDate)
+    const seriesKey = String(row.seriesKey ?? "");
+    const prefix = seriesPrefix ? `${seriesPrefix}.` : "";
+    const dotIdx = seriesKey.indexOf(".");
+    const suffix =
+      prefix && seriesKey.startsWith(prefix)
+        ? seriesKey.slice(prefix.length)
+        : dotIdx >= 0
+          ? seriesKey.slice(dotIdx + 1)
+          : seriesKey;
+
+    // Numeric value
+    if (typeof row.value === "number" && Number.isFinite(row.value)) {
+      group[suffix] = row.value;
+    }
+
+    // Copy primitive metadata fields (first non-empty wins)
+    if (meta) {
+      for (const [key, value] of Object.entries(meta)) {
+        if (
+          group[key] === undefined &&
+          (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+        ) {
+          group[key] = value;
+        }
+      }
+    }
+
+    // Canonical point id: prefer the duration metric, which represents the activity occurrence.
+    if (suffix === "duration" || seriesKey.endsWith(".duration")) {
+      group.canonical_time_series_point_id = row.id;
+    }
+    if (!group.canonical_time_series_point_id) {
+      group.canonical_time_series_point_id = row.id;
+    }
+  }
+
+  // Sort by observedAt descending (newest first) for stable output
+  const result = Array.from(groups.values());
+  result.sort((a, b) => {
+    const aIso = iso(a.observedAt);
+    const bIso = iso(b.observedAt);
+    const aTime = aIso ? Date.parse(aIso) : 0;
+    const bTime = bIso ? Date.parse(bIso) : 0;
+    if (aTime !== bTime) return bTime - aTime;
+    return String(a.activity_sort_key ?? "").localeCompare(String(b.activity_sort_key ?? ""));
+  });
+
+  // Set observed_at_label on each group
+  for (const group of result) {
+    const dt = group.observedAt;
+    const dateKey =
+      dt instanceof Date
+        ? dt.toISOString().slice(0, 10)
+        : typeof dt === "string"
+          ? dt.slice(0, 10)
+          : "";
+    group.observed_at_label = dateKey;
+    delete group.activity_sort_key;
+  }
+
+  return result;
+}
+
+async function attachActivityNotes(
+  db: ReturnType<typeof createDb>,
+  ctx: PageCtx,
+  rows: Record<string, unknown>[],
+): Promise<void> {
+  const pointIds: string[] = [];
+  for (const row of rows) {
+    const id = row.canonical_time_series_point_id;
+    if (typeof id === "string" && id) pointIds.push(id);
+  }
+  if (pointIds.length === 0) {
+    for (const row of rows) row.notes = [];
+    return;
+  }
+
+  // Fetch dependency edges: thought depends on our point via "references"
+  const edges = await db
+    .select()
+    .from(dependencyEdges)
+    .where(
+      and(
+        eq(dependencyEdges.ownerId, ctx.user.id),
+        eq(dependencyEdges.dependencyKind, "time_series_point"),
+        inArray(dependencyEdges.dependencyId, pointIds),
+        eq(dependencyEdges.dependentKind, "thought"),
+        eq(dependencyEdges.relationship, "references"),
+      ),
+    );
+
+  if (edges.length === 0) {
+    for (const row of rows) row.notes = [];
+    return;
+  }
+
+  // Fetch unique owner-scoped thought rows
+  const thoughtIds = [...new Set(edges.map((e) => e.dependentId))];
+  const thoughtRows = await db
+    .select()
+    .from(thoughts)
+    .where(and(eq(thoughts.ownerId, ctx.user.id), inArray(thoughts.id, thoughtIds)));
+
+  const thoughtMap = new Map<string, Record<string, unknown>>();
+  for (const t of thoughtRows) {
+    thoughtMap.set(t.id, {
+      id: t.id,
+      content: t.content,
+      type: t.type,
+      createdAt: t.createdAt,
+      created_at_label: t.createdAt ? (iso(t.createdAt)?.slice(0, 10) ?? "") : "",
+    });
+  }
+
+  // Build notes map from point id to thought list
+  const notesByPointId = new Map<string, Record<string, unknown>[]>();
+  for (const edge of edges) {
+    const thought = thoughtMap.get(edge.dependentId);
+    if (thought) {
+      const list = notesByPointId.get(edge.dependencyId) ?? [];
+      list.push(thought);
+      notesByPointId.set(edge.dependencyId, list);
+    }
+  }
+
+  // Assign notes to each row
+  for (const row of rows) {
+    const id = row.canonical_time_series_point_id;
+    row.notes = typeof id === "string" ? (notesByPointId.get(id) ?? []) : [];
+  }
+}
+
 function mapRows(
   kind: QueryKind,
   rows: Record<string, unknown>[],
@@ -375,9 +553,11 @@ function mapRows(
   const inputRows =
     transforms.includes("pivot_by_year") && kind === "time_series_points"
       ? pivotByYear(rows).slice(0, limit)
-      : transforms.includes("pivot_by_date") && kind === "time_series_points"
-        ? pivotByDate(rows, seriesPrefix).slice(0, limit)
-        : rows;
+      : transforms.includes("pivot_by_activity") && kind === "time_series_points"
+        ? pivotByActivity(rows, seriesPrefix).slice(0, limit)
+        : transforms.includes("pivot_by_date") && kind === "time_series_points"
+          ? pivotByDate(rows, seriesPrefix).slice(0, limit)
+          : rows;
   const withRows = inputRows.map((r) => {
     const out: Record<string, unknown> = { ...r };
     const createdAt = out.createdAt ?? out.created_at;
@@ -549,20 +729,22 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
               ]),
             )
             .orderBy(desc(timeSeriesPoints.observedAt))
-            // When pivot_by_date or pivot_by_year is active fetch enough pre-pivot rows;
-            // pivot_by_date needs ≤20 series per date, pivot_by_year needs ≤50 rows (all years).
+            // When pivot_by_year/pivot_by_activity/pivot_by_date is active fetch enough pre-pivot
+            // rows; pivot_by_year needs ≤50 rows, pivot_by_activity/date need ≤20 per activity/date.
             // mapRows slices to q.limit after pivoting.
             .limit(
               q.transforms.includes("pivot_by_year")
                 ? Math.min(q.limit * 50, 500)
-                : q.transforms.includes("pivot_by_date")
+                : q.transforms.includes("pivot_by_activity")
                   ? Math.min(q.limit * 20, 500)
-                  : q.limit,
+                  : q.transforms.includes("pivot_by_date")
+                    ? Math.min(q.limit * 20, 500)
+                    : q.limit,
             )
         );
     }
   })();
-  return mapRows(
+  const mapped = mapRows(
     q.kind,
     rows as Record<string, unknown>[],
     q.transforms,
@@ -570,6 +752,18 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
     q.limit,
     q.filters,
   );
+
+  // Apply activity_notes enrichment for time_series_points after pivoting
+  if (q.kind === "time_series_points" && q.transforms.includes("activity_notes")) {
+    const resultRows = Array.isArray(mapped)
+      ? mapped
+      : ((mapped as { rows: Record<string, unknown>[] }).rows ?? []);
+    if (resultRows.length > 0) {
+      await attachActivityNotes(db, ctx, resultRows);
+    }
+  }
+
+  return mapped;
 }
 
 export async function buildPageViewModel(

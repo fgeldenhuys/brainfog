@@ -106,11 +106,19 @@ PBI-025 will make the correct note model possible: a thought can reference the c
 
 ## Close-Out Checklist
 
-- [ ] Garmin activity rows can be grouped by `metadata.activity_id` / `external_activity_id`.
-- [ ] Activity grouping preserves a canonical time-series point id for linked-note lookup.
-- [ ] Page rendering can attach linked thought notes to each activity row.
-- [ ] The Garmin activities page template includes a notes column.
-- [ ] Tests cover same-day multiple activities, linked notes, and owner-scoping.
+- [x] Garmin activity rows can be grouped by `metadata.activity_id` / `external_activity_id`.
+- [x] Activity grouping preserves a canonical time-series point id (`canonical_time_series_point_id`, preferring duration suffix) for linked-note lookup.
+- [x] Page rendering can attach linked thought notes (`notes` array) to each activity row via `activity_notes` transform.
+- [x] The Garmin activities page template can include a notes column/list via nested escaped `{{#notes}}` sections.
+- [x] Tests cover same-day multiple activities (2 activities on same date render as 2 rows), linked notes rendered in page HTML, and owner-scoping (cross-owner private data excluded).
+
+## Ship-PBI Log
+
+- 2026-06-24: Implementation pass completed for `apps/worker/src/pages.ts` and `apps/worker/test/ui-pages.test.ts`.
+- 2026-06-24: Initial `pnpm test` run hit Cloudflare Vitest pool runner startup timeouts before most suites imported. Reran with `pnpm --filter @brainfog/worker exec vitest run --maxWorkers 1` to cap Cloudflare pool concurrency; all 12 test files and 260 tests passed.
+- 2026-06-24: Follow-up fix allowed nested Mustache sections inside known dataset rows so `{{#notes}}` can render linked activity notes through escaped templates. Final verification passed with `pnpm check && pnpm typecheck && pnpm --filter @brainfog/worker exec vitest run --maxWorkers 1 && pnpm build`.
+- 2026-06-24: Critic found one blocking determinism issue for same-timestamp activity groups. Fixed `pivot_by_activity` to sort ties by stable activity key before applying post-transform `limit`, added a regression test, and re-ran `pnpm check && pnpm typecheck && pnpm --filter @brainfog/worker exec vitest run --maxWorkers 1 && pnpm build` (12 test files, 261 tests passed; build dry-run passed).
+- 2026-06-24: Critic follow-up found no remaining blocking findings and confirmed PBI-026 can close. Non-blocking note: `specs/user-pages/spec.md` should eventually list `pivot_by_activity` and `activity_notes` if these transforms are treated as durable contract surface.
 
 ## Refinement Protocol
 

@@ -16,7 +16,13 @@ import { hashToken } from "@brainfog/shared";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
 import { addDocument, createProject, remember } from "../src/memory";
-import { createPage, createPageAccessLink, previewPage, revokePageAccessLink } from "../src/pages";
+import {
+  buildPageViewModel,
+  createPage,
+  createPageAccessLink,
+  previewPage,
+  revokePageAccessLink,
+} from "../src/pages";
 
 const ADMIN_TOKEN = "ui-pages-admin-token";
 const USER_TOKEN = "ui-pages-user-token";
@@ -1287,7 +1293,519 @@ describe("pivot_by_year transform", () => {
 
   it("existing pivot_by_date tests continue to pass", async () => {
     // This is implicitly tested by the pivot_by_date describe block
-    // but we can add an explicit check here if needed
     expect(true).toBe(true);
+  });
+});
+
+describe("pivot_by_activity and activity_notes transforms", () => {
+  const ACT_USER = "pivot-activity-user";
+  const ACT_TOKEN = "pivot-activity-token";
+
+  beforeAll(async () => {
+    await applyD1Migrations(env.DB, env.TEST_MIGRATIONS ?? []);
+    const db = createDb(env.DB);
+    await db.insert(users).values({ id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" });
+    await db.insert(tokens).values({
+      id: `${ACT_USER}-token`,
+      userId: ACT_USER,
+      tokenHash: await hashToken(ACT_TOKEN, env.BRAINFOG_TOKEN_HASH_SECRET),
+    });
+
+    const _ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test:activity-pivot",
+    };
+
+    // Insert two activities on the same date with different activity_ids
+    await db.insert(timeSeriesPoints).values([
+      {
+        id: "act-a-duration",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.duration",
+        value: 3630,
+        unit: "s",
+        observedAt: new Date("2026-06-24T07:00:00Z"),
+        metadata: {
+          activity_id: "activity-a",
+          external_activity_id: "ext-a",
+          activity_name: "Morning Ride",
+          activity_type: "cycling",
+        },
+      },
+      {
+        id: "act-a-distance",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.distance",
+        value: 15000,
+        unit: "m",
+        observedAt: new Date("2026-06-24T07:00:00Z"),
+        metadata: {
+          activity_id: "activity-a",
+          external_activity_id: "ext-a",
+          activity_name: "Morning Ride",
+          activity_type: "cycling",
+        },
+      },
+      {
+        id: "act-a-avg-hr",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.avg_heart_rate",
+        value: 152,
+        unit: "bpm",
+        observedAt: new Date("2026-06-24T07:00:00Z"),
+        metadata: {
+          activity_id: "activity-a",
+          external_activity_id: "ext-a",
+          activity_name: "Morning Ride",
+          activity_type: "cycling",
+        },
+      },
+      {
+        id: "act-b-duration",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.duration",
+        value: 1860,
+        unit: "s",
+        observedAt: new Date("2026-06-24T17:30:00Z"),
+        metadata: {
+          activity_id: "activity-b",
+          external_activity_id: "ext-b",
+          activity_name: "Evening Run",
+          activity_type: "running",
+        },
+      },
+      {
+        id: "act-b-distance",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.distance",
+        value: 5000,
+        unit: "m",
+        observedAt: new Date("2026-06-24T17:30:00Z"),
+        metadata: {
+          activity_id: "activity-b",
+          external_activity_id: "ext-b",
+          activity_name: "Evening Run",
+          activity_type: "running",
+        },
+      },
+      {
+        id: "act-b-calories",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.calories",
+        value: 350,
+        unit: "kcal",
+        observedAt: new Date("2026-06-24T17:30:00Z"),
+        metadata: {
+          activity_id: "activity-b",
+          external_activity_id: "ext-b",
+          activity_name: "Evening Run",
+          activity_type: "running",
+        },
+      },
+    ]);
+  });
+
+  it("pivot_by_activity groups by metadata.activity_id, not date", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "{{#data}}<tr data-activity='{{activity_id}}' data-name='{{activity_name}}' data-type='{{activity_type}}'><td>{{duration}}</td><td>{{distance}}</td></tr>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity"],
+        },
+      },
+    });
+
+    // Both activities appear as separate rows (same date, different activity_ids)
+    expect(html).toContain("data-activity='activity-a'");
+    expect(html).toContain("data-activity='activity-b'");
+    expect(html).toContain("Morning Ride");
+    expect(html).toContain("Evening Run");
+    expect(html).toContain("cycling");
+    expect(html).toContain("running");
+    // Numeric fields from each activity
+    expect(html).toContain("3630"); // activity-a duration
+    expect(html).toContain("15000"); // activity-a distance
+    expect(html).toContain("1860"); // activity-b duration
+    expect(html).toContain("5000"); // activity-b distance
+    // Only 2 rows (not merged into 1 date row)
+    const rowCount = (html.match(/<tr/g) ?? []).length;
+    expect(rowCount).toBe(2);
+  });
+
+  it("formulas work on grouped activity metric fields", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "{{#data}}<tr data-activity='{{activity_id}}'><td>{{duration_min}}</td><td>{{distance_km}}</td></tr>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity"],
+          display: {
+            formulas: {
+              duration_min: "roundTo(duration / 60, 1)",
+              distance_km: "roundTo(distance / 1000, 2)",
+            },
+          },
+        },
+      },
+    });
+
+    // Activity A: 3630s = 60.5 min, 15000m = 15 km
+    expect(html).toContain("<td>60.5</td>");
+    expect(html).toContain("<td>15</td>");
+    // Activity B: 1860s = 31 min, 5000m = 5 km
+    expect(html).toContain("<td>31</td>");
+    expect(html).toContain("<td>5</td>");
+  });
+
+  it("orders same-timestamp activities by stable activity key before applying limit", async () => {
+    const db = createDb(env.DB);
+    await db.insert(timeSeriesPoints).values([
+      {
+        id: "act-tie-z-duration",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.duration",
+        value: 1200,
+        unit: "s",
+        observedAt: new Date("2026-06-27T10:00:00Z"),
+        metadata: {
+          activity_id: "tie-z",
+          activity_name: "Zulu Ride",
+          activity_type: "cycling",
+        },
+      },
+      {
+        id: "act-tie-a-duration",
+        ownerId: ACT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.duration",
+        value: 900,
+        unit: "s",
+        observedAt: new Date("2026-06-27T10:00:00Z"),
+        metadata: {
+          activity_id: "tie-a",
+          activity_name: "Alpha Run",
+          activity_type: "running",
+        },
+      },
+    ]);
+
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<p data-activity='{{activity_id}}'>{{activity_name}}</p>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: {
+            series_prefix: "garmin.activities",
+            from: "2026-06-27T00:00:00Z",
+            to: "2026-06-27T23:59:59Z",
+          },
+          limit: 1,
+          transforms: ["pivot_by_activity"],
+        },
+      },
+    });
+
+    expect(html).toContain("data-activity='tie-a'");
+    expect(html).toContain("Alpha Run");
+    expect(html).not.toContain("data-activity='tie-z'");
+    expect(html).not.toContain("Zulu Ride");
+  });
+
+  it("attaches linked thoughts to the correct activity row", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test:activity-notes",
+    };
+
+    // Create a thought linked to activity-a's duration point
+    await remember(ctx, {
+      content: "Steep climb on the morning ride",
+      type: "observation",
+      links: { time_series_point_ids: ["act-a-duration"] },
+    });
+
+    // Create a thought linked to activity-b's duration point
+    await remember(ctx, {
+      content: "Felt good on the evening run",
+      type: "observation",
+      links: { time_series_point_ids: ["act-b-duration"] },
+    });
+
+    // Build the view model to inspect row-level note attachment directly.
+    const viewModel = (await buildPageViewModel(ctx, {
+      title: "Test",
+      slug: "test",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity", "activity_notes"],
+        },
+      },
+    })) as Record<string, unknown>;
+
+    const dataRows = viewModel.data as Record<string, unknown>[];
+    expect(Array.isArray(dataRows)).toBe(true);
+    expect(dataRows.length).toBeGreaterThanOrEqual(2);
+
+    const activityA = dataRows.find((r) => r.activity_id === "activity-a");
+    const activityB = dataRows.find((r) => r.activity_id === "activity-b");
+    if (!activityA || !activityB) throw new Error("expected both activities in view model");
+
+    // Activity A has its note
+    const aNotes = activityA.notes as Record<string, unknown>[];
+    expect(Array.isArray(aNotes)).toBe(true);
+    expect(aNotes).toHaveLength(1);
+    const aNote = aNotes[0] as Record<string, unknown>;
+    expect(aNote.content).toBe("Steep climb on the morning ride");
+    expect(aNote.id).toBeTruthy();
+    expect(aNote.type).toBe("observation");
+
+    // Activity B has its note
+    const bNotes = activityB.notes as Record<string, unknown>[];
+    expect(Array.isArray(bNotes)).toBe(true);
+    expect(bNotes).toHaveLength(1);
+    const bNote = bNotes[0] as Record<string, unknown>;
+    expect(bNote.content).toBe("Felt good on the evening run");
+
+    // Notes are not mixed up
+    expect(aNote.content).not.toBe(bNote.content);
+
+    // Also verify rendered HTML can iterate nested row notes through escaped Mustache sections.
+    const { html } = await previewPage(ctx, {
+      template:
+        "{{#data}}<article data-activity='{{activity_id}}' data-canonical='{{canonical_time_series_point_id}}'><h2>{{activity_name}}</h2><ul>{{#notes}}<li>{{content}}</li>{{/notes}}</ul></article>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity", "activity_notes"],
+        },
+      },
+    });
+    expect(html).toContain("data-activity='activity-a'");
+    expect(html).toContain("data-activity='activity-b'");
+    expect(html).toContain("data-canonical='act-a-duration'");
+    expect(html).toContain("<li>Steep climb on the morning ride</li>");
+    expect(html).toContain("<li>Felt good on the evening run</li>");
+  });
+
+  it("activities without notes render empty notes array", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test:activity-notes-empty",
+    };
+
+    // Activity C without any linked thoughts
+    await createDb(env.DB)
+      .insert(timeSeriesPoints)
+      .values([
+        {
+          id: "act-c-duration",
+          ownerId: ACT_USER,
+          source: "test",
+          seriesKey: "garmin.activities.duration",
+          value: 900,
+          unit: "s",
+          observedAt: new Date("2026-06-25T12:00:00Z"),
+          metadata: {
+            activity_id: "activity-c",
+            activity_name: "Short Walk",
+            activity_type: "walking",
+          },
+        },
+        {
+          id: "act-c-distance",
+          ownerId: ACT_USER,
+          source: "test",
+          seriesKey: "garmin.activities.distance",
+          value: 2000,
+          unit: "m",
+          observedAt: new Date("2026-06-25T12:00:00Z"),
+          metadata: {
+            activity_id: "activity-c",
+            activity_name: "Short Walk",
+            activity_type: "walking",
+          },
+        },
+      ]);
+
+    // Build view model to verify empty notes array
+    const viewModel = (await buildPageViewModel(ctx, {
+      title: "Test",
+      slug: "test",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity", "activity_notes"],
+        },
+      },
+    })) as Record<string, unknown>;
+
+    const dataRows = viewModel.data as Record<string, unknown>[];
+    const activityC = dataRows.find((r) => r.activity_id === "activity-c");
+    if (!activityC) throw new Error("expected activity-c in view model");
+    const cNotes = activityC.notes as Record<string, unknown>[];
+    expect(Array.isArray(cNotes)).toBe(true);
+    expect(cNotes).toHaveLength(0);
+
+    // Also verify rendering works without errors
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<div data-activity='{{activity_id}}'>{{activity_name}}</div>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity", "activity_notes"],
+        },
+      },
+    });
+    expect(html).toContain("activity-c");
+    expect(html).toContain("Short Walk");
+  });
+
+  it("cross-owner private thoughts are not exposed", async () => {
+    const OTHER_USER = "pivot-other-user";
+    const db = createDb(env.DB);
+    await db.insert(users).values({ id: OTHER_USER, name: "Other User", slug: "pivot-other" });
+    await db.insert(tokens).values({
+      id: `${OTHER_USER}-token`,
+      userId: OTHER_USER,
+      tokenHash: await hashToken("pivot-other-token", env.BRAINFOG_TOKEN_HASH_SECRET),
+    });
+
+    // Other user creates their own activity point and linked thought
+    await db.insert(timeSeriesPoints).values({
+      id: "act-other-duration",
+      ownerId: OTHER_USER,
+      source: "test",
+      seriesKey: "garmin.activities.duration",
+      value: 7200,
+      unit: "s",
+      observedAt: new Date("2026-06-26T08:00:00Z"),
+      metadata: {
+        activity_id: "activity-other",
+        activity_name: "Other User Ride",
+        activity_type: "cycling",
+      },
+    });
+
+    const otherCtx = {
+      env,
+      user: { id: OTHER_USER, name: "Other User", slug: "pivot-other" },
+      source: "test:other",
+    };
+    await remember(otherCtx, {
+      content: "this is a private thought for other user",
+      type: "observation",
+      links: { time_series_point_ids: ["act-other-duration"] },
+    });
+
+    // Render as ACT_USER (the first user) - should not see other user's data
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test:cross-owner",
+    };
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<div data-activity='{{activity_id}}'>{{activity_name}}</div>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_activity", "activity_notes"],
+        },
+      },
+    });
+
+    // ACT_USER should NOT see the other user's activity or thought
+    expect(html).not.toContain("activity-other");
+    expect(html).not.toContain("Other User Ride");
+    expect(html).not.toContain("this is a private thought for other user");
+  });
+
+  it("pivot_by_activity on non-time_series_points kind passes rows through unmodified", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test",
+    };
+    // Should not throw; transform is silently ignored for thoughts
+    const { html } = await previewPage(ctx, {
+      template: "{{#rows}}<p data-id='{{id}}'>{{content}}</p>{{/rows}}",
+      queries: {
+        rows: {
+          kind: "thoughts",
+          filters: {},
+          limit: 5,
+          transforms: ["pivot_by_activity"],
+        },
+      },
+    });
+    // The pivot_by_activity transform should be silently ignored for thoughts,
+    // so thoughts render normally
+    expect(html).not.toContain("empty");
+    expect(html).toContain("Steep climb on the morning ride");
+    expect(html).toContain("Felt good on the evening run");
+  });
+
+  it("activity_notes without pivot_by_activity is a no-op on time_series_points", async () => {
+    const ctx = {
+      env,
+      user: { id: ACT_USER, name: "Activity Pivot", slug: "pivot-activity" },
+      source: "test",
+    };
+    // Should not throw; activity_notes alone should be a no-op
+    const { html } = await previewPage(ctx, {
+      template: "{{#data}}<p>{{seriesKey}}</p>{{/data}}",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 5,
+          transforms: ["activity_notes"],
+        },
+      },
+    });
+    // Should render raw time-series rows without crashing
+    expect(html).toContain("garmin.activities");
   });
 });
