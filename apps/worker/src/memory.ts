@@ -1467,6 +1467,7 @@ async function applyThoughtLinks(
     task_ids?: string[];
     fact_ids?: string[];
     document_ids?: string[];
+    time_series_point_ids?: string[];
   },
 ) {
   if (!links) return;
@@ -1502,6 +1503,14 @@ async function applyThoughtLinks(
       relationship: "references",
     });
   }
+  for (const id of links.time_series_point_ids ?? []) {
+    await ensureEntity(ctx, "time_series_point", id, "time-series point link not found");
+    await createDependency(ctx, {
+      dependent: { kind: "thought", id: thoughtId },
+      dependency: { kind: "time_series_point", id },
+      relationship: "references",
+    });
+  }
 }
 
 async function validateThoughtLinks(ctx: Ctx, links?: Parameters<typeof applyThoughtLinks>[2]) {
@@ -1512,6 +1521,8 @@ async function validateThoughtLinks(ctx: Ctx, links?: Parameters<typeof applyTho
   for (const id of links.fact_ids ?? []) await ensureEntity(ctx, "fact", id, "fact link not found");
   for (const id of links.document_ids ?? [])
     await ensureEntity(ctx, "document", id, "document link not found");
+  for (const id of links.time_series_point_ids ?? [])
+    await ensureEntity(ctx, "time_series_point", id, "time-series point link not found");
 }
 
 export async function remember(

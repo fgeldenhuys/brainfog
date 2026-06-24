@@ -275,7 +275,10 @@ function dateFilter(column: Parameters<typeof gte>[0], filters: Record<string, u
   return out;
 }
 
-function pivotByDate(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+function pivotByDate(
+  rows: Record<string, unknown>[],
+  seriesPrefix?: string,
+): Record<string, unknown>[] {
   const groups = new Map<string, Record<string, unknown>>();
   for (const row of rows) {
     const dt = row.observedAt;
@@ -291,11 +294,26 @@ function pivotByDate(rows: Record<string, unknown>[]): Record<string, unknown>[]
     }
     const group = groups.get(dateKey) ?? {};
     const seriesKey = String(row.seriesKey ?? "");
+    const prefix = seriesPrefix ? `${seriesPrefix}.` : "";
     const dotIdx = seriesKey.indexOf(".");
-    const suffix = dotIdx >= 0 ? seriesKey.slice(dotIdx + 1) : seriesKey;
+    const suffix =
+      prefix && seriesKey.startsWith(prefix)
+        ? seriesKey.slice(prefix.length)
+        : dotIdx >= 0
+          ? seriesKey.slice(dotIdx + 1)
+          : seriesKey;
     if (typeof row.value === "number" && Number.isFinite(row.value)) group[suffix] = row.value;
     const meta = row.metadata as Record<string, unknown> | undefined;
-    if (meta?.notes && !group.notes) group.notes = String(meta.notes);
+    if (meta) {
+      for (const [key, value] of Object.entries(meta)) {
+        if (
+          group[key] === undefined &&
+          (typeof value === "string" || typeof value === "number" || typeof value === "boolean")
+        ) {
+          group[key] = value;
+        }
+      }
+    }
   }
   return Array.from(groups.values());
 }
@@ -350,22 +368,25 @@ function mapRows(
   transforms: string[],
   formulas?: Record<string, string>,
   limit?: number,
+  filters?: Record<string, unknown>,
 ) {
+  const seriesPrefix =
+    filters && typeof filters.series_prefix === "string" ? filters.series_prefix : undefined;
   const inputRows =
     transforms.includes("pivot_by_year") && kind === "time_series_points"
       ? pivotByYear(rows).slice(0, limit)
       : transforms.includes("pivot_by_date") && kind === "time_series_points"
-        ? pivotByDate(rows).slice(0, limit)
+        ? pivotByDate(rows, seriesPrefix).slice(0, limit)
         : rows;
   const withRows = inputRows.map((r) => {
     const out: Record<string, unknown> = { ...r };
-    const createdAt = r.createdAt ?? r.created_at;
-    const updatedAt = r.updatedAt ?? r.updated_at;
+    const createdAt = out.createdAt ?? out.created_at;
+    const updatedAt = out.updatedAt ?? out.updated_at;
     if (transforms.includes("date_labels")) {
       out.created_at_label = iso(createdAt)?.slice(0, 10) ?? "";
       out.updated_at_label = iso(updatedAt)?.slice(0, 10) ?? "";
-      if (r.dueAt) out.due_at_label = iso(r.dueAt)?.slice(0, 10) ?? "";
-      if (r.observedAt) out.observed_at_label = iso(r.observedAt)?.slice(0, 10) ?? "";
+      if (out.dueAt) out.due_at_label = iso(out.dueAt)?.slice(0, 10) ?? "";
+      if (out.observedAt) out.observed_at_label = iso(out.observedAt)?.slice(0, 10) ?? "";
     }
     if (transforms.includes("status_labels") && typeof r.status === "string")
       out.status_label = r.status.replace(/_/g, " ");
@@ -547,6 +568,7 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
     q.transforms,
     q.display?.formulas,
     q.limit,
+    q.filters,
   );
 }
 

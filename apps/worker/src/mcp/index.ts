@@ -515,7 +515,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register("list_projects", "List projects.", {}, () => listProjects(this.memoryCtx()));
     register(
       "link",
-      "Link a thought to global people or owned tasks, facts, and documents.",
+      "Link a thought to global people or owned tasks, facts, documents, and time-series points.",
       { thought_id: z.string(), links: obj },
       (args) =>
         linkThought(

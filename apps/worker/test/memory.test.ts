@@ -353,6 +353,163 @@ describe("memory model REST service", () => {
     expect(reject.status).toBe(404);
   });
 
+  it("links thoughts to time-series points via remember(..., links.time_series_point_ids)", async () => {
+    // Create a time-series point owned by user A
+    const point = await json<{ id: string; ownerId: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "dummy.test",
+          value: 42,
+          unit: "units",
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+    expect(point.ownerId).toBe("user-memory-a");
+
+    // Create a thought linked to the time-series point via links
+    const thought = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({
+          content: "Linked to a time-series point",
+          links: { time_series_point_ids: [point.id] },
+        }),
+      }),
+    );
+
+    // Verify the dependency_edges row
+    const edges = await createDb(env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.dependentId, thought.id),
+          eq(dependencyEdges.dependencyId, point.id),
+          eq(dependencyEdges.relationship, "references"),
+        ),
+      );
+    expect(edges).toEqual([
+      expect.objectContaining({
+        dependentKind: "thought",
+        dependencyKind: "time_series_point",
+        ownerId: "user-memory-a",
+      }),
+    ]);
+  });
+
+  it("links time-series points to an existing thought via the link endpoint", async () => {
+    const point = await json<{ id: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "dummy.test",
+          value: 1,
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+
+    const thought = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({ content: "Thought to be linked" }),
+      }),
+    );
+
+    // Link the existing thought to the time-series point
+    const linkResult = await json<{ ok: boolean }>(
+      await authFetch(`/api/v1/thoughts/${thought.id}/links`, {
+        method: "POST",
+        body: JSON.stringify({ time_series_point_ids: [point.id] }),
+      }),
+    );
+    expect(linkResult.ok).toBe(true);
+
+    const edges = await createDb(env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.dependentId, thought.id),
+          eq(dependencyEdges.dependencyId, point.id),
+          eq(dependencyEdges.relationship, "references"),
+        ),
+      );
+    expect(edges).toEqual([
+      expect.objectContaining({
+        dependentKind: "thought",
+        dependencyKind: "time_series_point",
+      }),
+    ]);
+  });
+
+  it("rejects cross-owner private time-series point links via remember", async () => {
+    // User A creates a time-series point (not shared)
+    const point = await json<{ id: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "dummy.private",
+          value: 99,
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+
+    // User B tries to link to User A's private time-series point
+    const reject = await authFetch(
+      "/api/v1/thoughts",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          content: "Cross-owner link attempt",
+          links: { time_series_point_ids: [point.id] },
+        }),
+      },
+      TOKEN_B,
+    );
+    expect(reject.status).toBe(404);
+  });
+
+  it("rejects cross-owner private time-series point links via link endpoint", async () => {
+    // User A creates a time-series point (not shared)
+    const point = await json<{ id: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "dummy.private",
+          value: 88,
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+
+    // User B creates their own thought
+    const thought = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/thoughts",
+        {
+          method: "POST",
+          body: JSON.stringify({ content: "B's thought" }),
+        },
+        TOKEN_B,
+      ),
+    );
+
+    // User B tries to link to User A's private time-series point
+    const reject = await authFetch(
+      `/api/v1/thoughts/${thought.id}/links`,
+      {
+        method: "POST",
+        body: JSON.stringify({ time_series_point_ids: [point.id] }),
+      },
+      TOKEN_B,
+    );
+    expect(reject.status).toBe(404);
+  });
+
   it("records facts, derivations, supersession lifecycle, update re-embedding path, and recall", async () => {
     const thought = await json<{ id: string }>(
       await authFetch("/api/v1/thoughts", {
@@ -1303,6 +1460,90 @@ describe("memory model REST service", () => {
       kinds: ["thought"],
     });
     expect(recalled.some((r) => r.row.id === thought.id)).toBe(true);
+  });
+
+  it("MCP link tool can link a thought to a time-series point", async () => {
+    // Create a time-series point via REST
+    const point = await json<{ id: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "mcp.link.test",
+          value: 7,
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+
+    // Create a thought via MCP
+    const thought = await callMcpTool<{ id: string }>("remember", {
+      content: "MCP thought for time-series link test",
+    });
+
+    // Link the thought to the time-series point via MCP link tool
+    const linkResult = await callMcpTool<{ ok: boolean }>("link", {
+      thought_id: thought.id,
+      links: { time_series_point_ids: [point.id] },
+    });
+    expect(linkResult.ok).toBe(true);
+
+    // Verify the dependency edge via direct DB query
+    const edges = await createDb(env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.dependentId, thought.id),
+          eq(dependencyEdges.dependencyId, point.id),
+          eq(dependencyEdges.relationship, "references"),
+        ),
+      );
+    expect(edges).toEqual([
+      expect.objectContaining({
+        dependentKind: "thought",
+        dependencyKind: "time_series_point",
+        source: "mcp:tool",
+      }),
+    ]);
+  });
+
+  it("MCP remember tool with links.time_series_point_ids creates a references edge", async () => {
+    // Create a time-series point via REST
+    const point = await json<{ id: string }>(
+      await authFetch("/api/v1/time-series-points", {
+        method: "POST",
+        body: JSON.stringify({
+          series_key: "mcp.remember.test",
+          value: 3,
+          observed_at: 1_800_000_000,
+        }),
+      }),
+    );
+
+    // Create a thought via MCP remember with time_series_point_ids in links
+    const thought = await callMcpTool<{ id: string }>("remember", {
+      content: "MCP thought with time-series link in remember",
+      links: { time_series_point_ids: [point.id] },
+    });
+
+    // Verify the dependency edge via direct DB query
+    const edges = await createDb(env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(
+        and(
+          eq(dependencyEdges.dependentId, thought.id),
+          eq(dependencyEdges.dependencyId, point.id),
+          eq(dependencyEdges.relationship, "references"),
+        ),
+      );
+    expect(edges).toEqual([
+      expect.objectContaining({
+        dependentKind: "thought",
+        dependencyKind: "time_series_point",
+        source: "mcp:tool",
+      }),
+    ]);
   });
 
   it("whoami MCP tool mirrors the REST /api/v1/whoami service layer", async () => {

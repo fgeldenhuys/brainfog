@@ -932,6 +932,78 @@ describe("pivot_by_date transform", () => {
     expect(html).toContain("second note");
   });
 
+  it("uses the query series_prefix for multi-segment pivot fields", async () => {
+    const db = createDb(env.DB);
+    const metadata = {
+      activity_name: "Great Kei Cycling",
+      activity_type: "cycling",
+      activity_id: "23296884177",
+    };
+    await db.insert(timeSeriesPoints).values([
+      {
+        id: "pivot-garmin-duration",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.duration",
+        value: 1913,
+        unit: "s",
+        observedAt: new Date("2026-06-18T11:27:32Z"),
+        metadata,
+      },
+      {
+        id: "pivot-garmin-distance",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.distance",
+        value: 4210,
+        unit: "m",
+        observedAt: new Date("2026-06-18T11:27:32Z"),
+        metadata,
+      },
+      {
+        id: "pivot-garmin-avg-hr",
+        ownerId: PIVOT_USER,
+        source: "test",
+        seriesKey: "garmin.activities.avg_heart_rate",
+        value: 158,
+        unit: "bpm",
+        observedAt: new Date("2026-06-18T11:27:32Z"),
+        metadata,
+      },
+    ]);
+
+    const ctx = {
+      env,
+      user: { id: PIVOT_USER, name: "Pivot", slug: "pivot-test" },
+      source: "test",
+    };
+    const { html } = await previewPage(ctx, {
+      template:
+        "<table>{{#data}}<tr><td>{{observed_at_label}}</td><td>{{activity_name}}</td><td>{{activity_type}}</td><td>{{duration_min}}</td><td>{{distance_km}}</td><td>{{avg_heart_rate}}</td></tr>{{/data}}</table>",
+      queries: {
+        data: {
+          kind: "time_series_points",
+          filters: { series_prefix: "garmin.activities" },
+          limit: 10,
+          transforms: ["pivot_by_date", "date_labels"],
+          display: {
+            formulas: {
+              duration_min: "roundTo(duration / 60, 1)",
+              distance_km: "roundTo(distance / 1000, 2)",
+            },
+          },
+        },
+      },
+    });
+
+    expect(html).toContain("2026-06-18");
+    expect(html).toContain("Great Kei Cycling");
+    expect(html).toContain("cycling");
+    expect(html).toContain("31.9");
+    expect(html).toContain("4.21");
+    expect(html).toContain("158");
+  });
+
   it("applies limit to post-pivot rows, not pre-pivot rows", async () => {
     const ctx = {
       env,
