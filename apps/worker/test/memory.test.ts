@@ -121,6 +121,20 @@ async function callMcpTool<T>(name: string, args: Record<string, unknown>, token
   return JSON.parse(m.result?.content?.[0]?.text ?? "null") as T;
 }
 
+async function callMcpToolRaw(name: string, args: Record<string, unknown>, token = TOKEN_A) {
+  const session = await mcpSession(token);
+  const result = await mcpRequest(
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } },
+    session,
+    token,
+  );
+  expect(result.response.status).toBe(200);
+  return result.message as {
+    result?: { isError?: boolean; content?: { text?: string }[] };
+    error?: unknown;
+  };
+}
+
 function dependencyGraphMigrationSql() {
   const migration = (
     env.TEST_MIGRATIONS as unknown as Array<{ name?: string; queries?: string[] }>
@@ -399,6 +413,26 @@ describe("memory model REST service", () => {
     ]);
   });
 
+  it("rejects unknown thought link keys via remember", async () => {
+    const response = await authFetch("/api/v1/thoughts", {
+      method: "POST",
+      body: JSON.stringify({
+        content: "Thought with a mistyped link key",
+        links: { time_series_points: ["point-id"] },
+      }),
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error?: string };
+    expect(payload.error).toBe("unknown thought link key: time_series_points");
+
+    const rows = await createDb(env.DB)
+      .select({ id: thoughts.id })
+      .from(thoughts)
+      .where(eq(thoughts.content, "Thought with a mistyped link key"));
+    expect(rows).toEqual([]);
+  });
+
   it("links time-series points to an existing thought via the link endpoint", async () => {
     const point = await json<{ id: string }>(
       await authFetch("/api/v1/time-series-points", {
@@ -443,6 +477,30 @@ describe("memory model REST service", () => {
         dependencyKind: "time_series_point",
       }),
     ]);
+  });
+
+  it("rejects unknown thought link keys via the link endpoint", async () => {
+    const thought = await json<{ id: string }>(
+      await authFetch("/api/v1/thoughts", {
+        method: "POST",
+        body: JSON.stringify({ content: "Thought with bad link endpoint payload" }),
+      }),
+    );
+
+    const response = await authFetch(`/api/v1/thoughts/${thought.id}/links`, {
+      method: "POST",
+      body: JSON.stringify({ time_series_points: ["point-id"] }),
+    });
+
+    expect(response.status).toBe(400);
+    const payload = (await response.json()) as { error?: string };
+    expect(payload.error).toBe("unknown thought link key: time_series_points");
+
+    const edges = await createDb(env.DB)
+      .select()
+      .from(dependencyEdges)
+      .where(eq(dependencyEdges.dependentId, thought.id));
+    expect(edges).toEqual([]);
   });
 
   it("rejects cross-owner private time-series point links via remember", async () => {
@@ -1582,6 +1640,27 @@ describe("memory model REST service", () => {
         source: "mcp:tool",
       }),
     ]);
+  });
+
+  it("MCP remember and link tools reject unknown thought link keys", async () => {
+    const rememberResult = await callMcpToolRaw("remember", {
+      content: "MCP thought with mistyped link key",
+      links: { time_series_points: ["point-id"] },
+    });
+    expect(rememberResult.error).toBeUndefined();
+    expect(rememberResult.result?.isError).toBe(true);
+    expect(rememberResult.result?.content?.[0]?.text).toContain("time_series_points");
+
+    const thought = await callMcpTool<{ id: string }>("remember", {
+      content: "MCP thought for bad link payload",
+    });
+    const linkResult = await callMcpToolRaw("link", {
+      thought_id: thought.id,
+      links: { time_series_points: ["point-id"] },
+    });
+    expect(linkResult.error).toBeUndefined();
+    expect(linkResult.result?.isError).toBe(true);
+    expect(linkResult.result?.content?.[0]?.text).toContain("time_series_points");
   });
 
   it("whoami MCP tool mirrors the REST /api/v1/whoami service layer", async () => {

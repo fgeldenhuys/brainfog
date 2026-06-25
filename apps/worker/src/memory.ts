@@ -1467,17 +1467,39 @@ export async function listTasks(ctx: Ctx, q: { project_id?: string; status?: str
     .orderBy(desc(tasks.createdAt));
 }
 
-async function applyThoughtLinks(
-  ctx: Ctx,
-  thoughtId: string,
-  links?: {
-    people_ids?: string[];
-    task_ids?: string[];
-    fact_ids?: string[];
-    document_ids?: string[];
-    time_series_point_ids?: string[];
-  },
-) {
+type ThoughtLinks = {
+  people_ids?: string[];
+  task_ids?: string[];
+  fact_ids?: string[];
+  document_ids?: string[];
+  time_series_point_ids?: string[];
+};
+
+const thoughtLinkKeys = new Set([
+  "people_ids",
+  "task_ids",
+  "fact_ids",
+  "document_ids",
+  "time_series_point_ids",
+]);
+
+function assertThoughtLinksShape(links?: unknown): asserts links is ThoughtLinks | undefined {
+  if (!links) return;
+  if (typeof links !== "object" || Array.isArray(links)) {
+    throw new MemoryError(400, "links must be an object");
+  }
+  const unknownKeys = Object.keys(links).filter((key) => !thoughtLinkKeys.has(key));
+  if (unknownKeys.length > 0) {
+    throw new MemoryError(400, `unknown thought link key: ${unknownKeys[0]}`);
+  }
+  for (const [key, value] of Object.entries(links)) {
+    if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+      throw new MemoryError(400, `thought link key must be a string array: ${key}`);
+    }
+  }
+}
+
+async function applyThoughtLinks(ctx: Ctx, thoughtId: string, links?: ThoughtLinks) {
   if (!links) return;
   for (const id of links.people_ids ?? []) {
     await ensureEntity(ctx, "person", id, "person link not found");
@@ -1521,7 +1543,8 @@ async function applyThoughtLinks(
   }
 }
 
-async function validateThoughtLinks(ctx: Ctx, links?: Parameters<typeof applyThoughtLinks>[2]) {
+async function validateThoughtLinks(ctx: Ctx, links?: unknown) {
+  assertThoughtLinksShape(links);
   if (!links) return;
   for (const id of links.people_ids ?? [])
     await ensureEntity(ctx, "person", id, "person link not found");
@@ -1539,7 +1562,7 @@ export async function remember(
     content: string;
     type?: string;
     project_id?: string;
-    links?: Parameters<typeof applyThoughtLinks>[2];
+    links?: ThoughtLinks;
   },
 ) {
   const projectId = optionalProjectId(input.project_id);
@@ -1570,11 +1593,7 @@ export async function remember(
   return row;
 }
 
-export async function linkThought(
-  ctx: Ctx,
-  thoughtId: string,
-  links: Parameters<typeof applyThoughtLinks>[2],
-) {
+export async function linkThought(ctx: Ctx, thoughtId: string, links: ThoughtLinks) {
   const row = (
     await createDb(ctx.env.DB)
       .select({ id: thoughts.id })
@@ -1583,6 +1602,7 @@ export async function linkThought(
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "thought not found");
+  await validateThoughtLinks(ctx, links);
   await applyThoughtLinks(ctx, thoughtId, links);
   return { ok: true };
 }

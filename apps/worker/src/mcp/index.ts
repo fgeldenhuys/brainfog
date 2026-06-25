@@ -75,6 +75,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     const obj = z.record(z.string(), z.unknown()).optional();
     const requiredObj = z.record(z.string(), z.unknown());
     const strings = z.array(z.string()).optional();
+    const thoughtLinks = z
+      .record(z.string(), z.array(z.string()))
+      .describe(
+        "Optional thought links object. Allowed keys: people_ids, task_ids, fact_ids, document_ids, time_series_point_ids; values must be string arrays.",
+      )
+      .optional();
     const nullableString = z.string().nullable().optional();
     const projectId = z
       .string()
@@ -213,7 +219,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         content: z.string(),
         type: z.enum(["observation", "idea", "reference", "person_note"]).optional(),
         project_id: projectId,
-        links: obj,
+        links: thoughtLinks,
       },
       (args) => remember(this.memoryCtx(), args as Parameters<typeof remember>[1]),
     );
@@ -531,7 +537,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register(
       "link",
       "Link a thought to global people or owned tasks, facts, documents, and time-series points.",
-      { thought_id: z.string(), links: obj },
+      { thought_id: z.string(), links: thoughtLinks },
       (args) =>
         linkThought(
           this.memoryCtx(),
