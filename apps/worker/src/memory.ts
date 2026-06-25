@@ -118,6 +118,13 @@ async function ensureProject(ctx: Ctx, id?: string | null) {
   if (!row) throw new MemoryError(404, "project not found");
 }
 
+function optionalProjectId(value: unknown) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") throw new MemoryError(400, "project_id must be a string");
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
 function asGraphKind(kind: unknown): GraphKind {
   if (typeof kind === "string" && (graphKinds as readonly string[]).includes(kind))
     return kind as GraphKind;
@@ -1391,11 +1398,12 @@ function validateRecurrence(recurrence: unknown) {
 }
 
 export async function createTask(ctx: Ctx, input: Record<string, unknown>) {
-  await ensureProject(ctx, input.project_id as string | undefined);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   const row = {
     id: createId("task"),
     ownerId: ctx.user.id,
-    projectId: (input.project_id as string | undefined) ?? null,
+    projectId,
     source: source(ctx),
     title: String(input.title),
     description: (input.description as string | undefined) ?? null,
@@ -1423,7 +1431,7 @@ export async function updateTask(ctx: Ctx, id: string, input: Record<string, unk
   )[0];
   if (!row) throw new MemoryError(404, "task not found");
   const hasProjectId = Object.hasOwn(input, "project_id");
-  const projectId = hasProjectId ? (input.project_id as string | null) : row.projectId;
+  const projectId = hasProjectId ? optionalProjectId(input.project_id) : row.projectId;
   await ensureProject(ctx, projectId);
   await db
     .update(tasks)
@@ -1534,13 +1542,14 @@ export async function remember(
     links?: Parameters<typeof applyThoughtLinks>[2];
   },
 ) {
-  await ensureProject(ctx, input.project_id);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   await validateThoughtLinks(ctx, input.links);
   const db = createDb(ctx.env.DB);
   const row = {
     id: createId("thought"),
     ownerId: ctx.user.id,
-    projectId: input.project_id ?? null,
+    projectId,
     source: source(ctx),
     content: input.content,
     type: input.type ?? "observation",
@@ -1552,7 +1561,7 @@ export async function remember(
     kind: "thought",
     owner_id: ctx.user.id,
     shared: false,
-    ...(input.project_id ? { project_id: input.project_id } : {}),
+    ...(projectId ? { project_id: projectId } : {}),
   });
   const cascaded = await applyProjectContagion(ctx, "thought", row.id, row.projectId);
   if (cascaded.length > 0) {
@@ -1693,7 +1702,8 @@ export async function recordFact(
     supersedes_fact_id?: string;
   },
 ) {
-  await ensureProject(ctx, input.project_id);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   const db = createDb(ctx.env.DB);
   if (input.supersedes_fact_id) {
     const old = (
@@ -1710,7 +1720,7 @@ export async function recordFact(
   const row = {
     id,
     ownerId: ctx.user.id,
-    projectId: input.project_id ?? null,
+    projectId,
     source: source(ctx),
     statement: input.statement,
     citations: input.citations ?? [],
@@ -1737,7 +1747,7 @@ export async function recordFact(
     kind: "fact",
     owner_id: ctx.user.id,
     shared: false,
-    ...(input.project_id ? { project_id: input.project_id } : {}),
+    ...(projectId ? { project_id: projectId } : {}),
   });
   const created = (await db.select().from(facts).where(eq(facts.id, row.id)))[0];
   if (!created) throw new MemoryError(500, "fact insert failed");
@@ -1860,7 +1870,8 @@ export async function addDocument(
     derived_from?: Parameters<typeof applyFactDerivations>[2];
   },
 ) {
-  await ensureProject(ctx, input.project_id);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   const db = createDb(ctx.env.DB);
   const id = createId("document");
   await validateFactDerivations(ctx, id, input.derived_from);
@@ -1871,7 +1882,7 @@ export async function addDocument(
   const row = {
     id,
     ownerId: ctx.user.id,
-    projectId: input.project_id ?? null,
+    projectId,
     source: source(ctx),
     title: input.title,
     r2Key,
@@ -1880,7 +1891,7 @@ export async function addDocument(
   };
   await db.insert(documents).values(row);
   await applyDocumentDerivations(ctx, id, input.derived_from);
-  await insertChunks(ctx, id, input.content, input.project_id ?? null);
+  await insertChunks(ctx, id, input.content, projectId);
   const cascaded = await applyProjectContagion(ctx, "document", row.id, row.projectId);
   if (cascaded.length > 0) {
     return { ...row, cascaded };
@@ -1965,7 +1976,8 @@ export async function createDocumentFromBytes(
   if (input.bytes.byteLength > directDocumentUploadMaxBytes) {
     throw new MemoryError(400, "document upload exceeds 25 MiB limit");
   }
-  await ensureProject(ctx, input.project_id);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   const db = createDb(ctx.env.DB);
   const id = createId("document");
   const mimeType = validateMimeType(input.mime_type);
@@ -1984,7 +1996,7 @@ export async function createDocumentFromBytes(
   const row = {
     id,
     ownerId: ctx.user.id,
-    projectId: input.project_id ?? null,
+    projectId,
     source: source(ctx),
     title,
     r2Key,
@@ -1993,7 +2005,7 @@ export async function createDocumentFromBytes(
   };
   await db.insert(documents).values(row);
   if (decodedText !== undefined) {
-    await insertChunks(ctx, id, decodedText, input.project_id ?? null);
+    await insertChunks(ctx, id, decodedText, projectId);
   }
   const cascaded = await applyProjectContagion(ctx, "document", row.id, row.projectId);
   if (cascaded.length > 0) return { ...row, cascaded };
@@ -2057,13 +2069,14 @@ export async function createDocumentUploadLink(
   input: { title: string; filename?: string; mime_type?: string; project_id?: string },
 ) {
   if (!input.title?.trim()) throw new MemoryError(400, "missing title");
-  await ensureProject(ctx, input.project_id);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   const mimeType = validateMimeType(input.mime_type);
   const path = transferPath("/api/v1/documents/direct-upload", {
     title: input.title,
     filename: input.filename,
     mime_type: mimeType,
-    project_id: input.project_id,
+    project_id: projectId ?? undefined,
   });
   return {
     url: path,
@@ -2396,7 +2409,7 @@ export async function recordTimeSeriesPoints(
   const rows = points.map((point) => ({
     id: createId("timeSeriesPoint"),
     ownerId: ctx.user.id,
-    projectId: (point.project_id as string | undefined) ?? null,
+    projectId: optionalProjectId(point.project_id),
     source: source(ctx),
     seriesKey: String(point.series_key ?? ""),
     value: point.value === undefined || point.value === null ? null : Number(point.value),
@@ -2421,13 +2434,14 @@ export async function validateTimeSeriesPointsInput(
   points: Array<Record<string, unknown>>,
 ) {
   for (const point of points) {
-    await ensureProject(ctx, point.project_id as string | undefined);
+    await ensureProject(ctx, optionalProjectId(point.project_id));
     asDate(point.observed_at);
   }
 }
 
 export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unknown>) {
-  await ensureProject(ctx, input.project_id as string | undefined);
+  const projectId = optionalProjectId(input.project_id);
+  await ensureProject(ctx, projectId);
   await validateSubject(
     ctx,
     input.subject_type as string | undefined,
@@ -2436,7 +2450,7 @@ export async function recordTimeSeriesPoint(ctx: Ctx, input: Record<string, unkn
   const row = {
     id: createId("timeSeriesPoint"),
     ownerId: ctx.user.id,
-    projectId: (input.project_id as string | undefined) ?? null,
+    projectId,
     source: source(ctx),
     seriesKey: String(input.series_key),
     value: input.value === undefined || input.value === null ? null : Number(input.value),

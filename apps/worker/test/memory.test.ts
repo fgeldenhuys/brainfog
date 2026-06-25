@@ -1462,6 +1462,44 @@ describe("memory model REST service", () => {
     expect(recalled.some((r) => r.row.id === thought.id)).toBe(true);
   });
 
+  it("normalizes blank project_id to global scope for service memory writes", async () => {
+    const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+    const thought = await remember(ctx, {
+      content: "blank project id should be global",
+      project_id: "",
+    });
+
+    expect(thought.projectId).toBeNull();
+    const rows = await createDb(env.DB).select().from(thoughts).where(eq(thoughts.id, thought.id));
+    expect(rows[0]?.projectId).toBeNull();
+  });
+
+  it("MCP remember rejects empty project_id before persistence", async () => {
+    const session = await mcpSession();
+    const result = await mcpRequest(
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: {
+          name: "remember",
+          arguments: { content: "MCP empty project id should not persist", project_id: "" },
+        },
+      },
+      session,
+    );
+
+    expect(result.response.status).toBe(200);
+    const text = (result.message as { result?: { content?: { text?: string }[] } }).result
+      ?.content?.[0]?.text;
+    expect(text).toContain("MCP error");
+    const rows = await createDb(env.DB)
+      .select()
+      .from(thoughts)
+      .where(eq(thoughts.content, "MCP empty project id should not persist"));
+    expect(rows).toHaveLength(0);
+  });
+
   it("MCP link tool can link a thought to a time-series point", async () => {
     // Create a time-series point via REST
     const point = await json<{ id: string }>(

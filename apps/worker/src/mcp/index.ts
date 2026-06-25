@@ -76,6 +76,21 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     const requiredObj = z.record(z.string(), z.unknown());
     const strings = z.array(z.string()).optional();
     const nullableString = z.string().nullable().optional();
+    const projectId = z
+      .string()
+      .min(1)
+      .describe(
+        "Existing project ID for project-scoped records. Omit for global/personal records; do not pass an empty string.",
+      )
+      .optional();
+    const nullableProjectId = z
+      .string()
+      .min(1)
+      .nullable()
+      .describe(
+        "Existing project ID for project-scoped records, or null to clear project scope. Omit for global/personal records; do not pass an empty string.",
+      )
+      .optional();
     const nullableNumber = z.number().nullable().optional();
     const recurrence = z
       .object({
@@ -98,7 +113,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "Recall relevant context from brainfog memory before proceeding with the current conversation.",
       {
         topic: z.string().optional(),
-        project_id: z.string().optional(),
+        project_id: projectId,
       },
       async (args) => {
         const topic = args.topic ? String(args.topic) : undefined;
@@ -144,7 +159,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "save-session-notes",
       "Persist durable facts, thoughts, and tasks from the current session before finishing.",
       {
-        project_id: z.string().optional(),
+        project_id: projectId,
       },
       async (args) => {
         const projectId = args.project_id ? String(args.project_id) : undefined;
@@ -197,7 +212,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         content: z.string(),
         type: z.enum(["observation", "idea", "reference", "person_note"]).optional(),
-        project_id: z.string().optional(),
+        project_id: projectId,
         links: obj,
       },
       (args) => remember(this.memoryCtx(), args as Parameters<typeof remember>[1]),
@@ -209,7 +224,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         statement: z.string(),
         citations: strings,
         confidence: z.number().optional(),
-        project_id: z.string().optional(),
+        project_id: projectId,
         topics: strings,
         derived_from: obj,
         supersedes_fact_id: z.string().optional(),
@@ -237,7 +252,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         title: z.string(),
         content: z.string(),
-        project_id: z.string().optional(),
+        project_id: projectId,
         mime_type: z.string().optional(),
         derived_from: obj,
       },
@@ -283,7 +298,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         title: z.string(),
         filename: z.string().optional(),
         mime_type: z.string().optional(),
-        project_id: z.string().optional(),
+        project_id: projectId,
       },
       (args) =>
         createDocumentUploadLink(
@@ -307,7 +322,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         query: z.string(),
         kinds: strings,
-        project_id: z.string().optional(),
+        project_id: projectId,
         limit: z.number().optional(),
       },
       (args) => recall(this.memoryCtx(), args as Parameters<typeof recall>[1]),
@@ -318,7 +333,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         title: z.string(),
         description: nullableString,
-        project_id: nullableString,
+        project_id: nullableProjectId,
         due_at: nullableNumber,
         status: z.enum(["open", "in_progress", "done", "cancelled"]).optional(),
         priority: z.number().min(0).max(1).optional(),
@@ -333,7 +348,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         id: z.string(),
         title: z.string().optional(),
         description: nullableString,
-        project_id: nullableString,
+        project_id: nullableProjectId,
         due_at: nullableNumber,
         status: z.enum(["open", "in_progress", "done", "cancelled"]).optional(),
         priority: z.number().min(0).max(1).optional(),
@@ -344,7 +359,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register(
       "list_tasks",
       "List tasks.",
-      { project_id: z.string().optional(), status: z.string().optional() },
+      { project_id: projectId, status: z.string().optional() },
       (args) => listTasks(this.memoryCtx(), args),
     );
     register(
@@ -355,7 +370,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         value: nullableNumber,
         unit: nullableString,
         observed_at: nullableNumber,
-        project_id: nullableString,
+        project_id: nullableProjectId,
         subject_type: nullableString,
         subject_id: nullableString,
         metadata: obj,
@@ -368,7 +383,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         series_key: z.string().optional(),
         series_prefix: z.string().optional(),
-        project_id: z.string().optional(),
+        project_id: projectId,
         subject_type: z.string().optional(),
         subject_id: z.string().optional(),
         from: z.number().optional(),
@@ -387,7 +402,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
               value: nullableNumber,
               unit: nullableString,
               observed_at: nullableNumber,
-              project_id: nullableString,
+              project_id: nullableProjectId,
               metadata: obj,
             }),
           )
@@ -401,7 +416,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       {
         type: z.string(),
         name: z.string().optional(),
-        project_id: nullableString,
+        project_id: nullableProjectId,
         source: z.string().optional(),
         status: z.enum(["active", "paused", "disabled"]).optional(),
         config: obj,
@@ -420,7 +435,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         id: z.string(),
         type: z.string().optional(),
         name: z.string().optional(),
-        project_id: nullableString,
+        project_id: nullableProjectId,
         source: z.string().optional(),
         status: z.enum(["active", "paused", "disabled"]).optional(),
         config: obj,
@@ -575,7 +590,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     register(
       "list_stale",
       "List stale dependency graph edges.",
-      { kind: z.string().optional(), project_id: z.string().optional() },
+      { kind: z.string().optional(), project_id: projectId },
       (args) => listStale(this.memoryCtx(), args),
     );
     register(
