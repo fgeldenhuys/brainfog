@@ -21,12 +21,15 @@ import {
   addDocument,
   createDocumentFromBytes,
   createDocumentUploadLink,
+  createProject,
+  createTask,
   deleteDocument,
   deleteFact,
   deleteThought,
   getDocumentVersionBytes,
   recall,
   recordFact,
+  recordTimeSeriesPoint,
   remember,
   setShared,
   updateDocument,
@@ -4788,6 +4791,151 @@ describe("Shared visibility", async () => {
         });
         expect(hasChunkWithShared).toBe(true);
       }
+    });
+  });
+
+  describe("project deletion", () => {
+    it("deletes an owned project with no scoped objects and removes it from listing", async () => {
+      // Create a project via REST
+      const project = await json<{ id: string; name: string }>(
+        await authFetch("/api/v1/projects", {
+          method: "POST",
+          body: JSON.stringify({ name: "To be deleted" }),
+        }),
+      );
+
+      // Verify project appears in listing
+      const before = await json<{ id: string }[]>(await authFetch("/api/v1/projects"));
+      expect(before.map((p) => p.id)).toContain(project.id);
+
+      // Delete via REST
+      const delRes = await authFetch(`/api/v1/projects/${project.id}`, { method: "DELETE" });
+      expect(delRes.status).toBe(200);
+      const delBody = await delRes.json<{ ok: boolean }>();
+      expect(delBody).toEqual({ ok: true });
+
+      // Verify it's gone from listing
+      const after = await json<{ id: string }[]>(await authFetch("/api/v1/projects"));
+      expect(after.map((p) => p.id)).not.toContain(project.id);
+    });
+
+    it("deletes an owned project with scoped objects, unlinking (not deleting) them", async () => {
+      // Create a project via service function for direct id access
+      const ctx = {
+        env,
+        user: { id: "user-memory-a", name: "Memory A" },
+        source: "test:unit",
+      };
+      const project = await createProject(ctx, { name: "Scoped deletion test" });
+
+      // Create scoped objects
+      const thought = await remember(ctx, {
+        content: "project-scoped thought",
+        project_id: project.id,
+      });
+      const task = await createTask(ctx, {
+        title: "project-scoped task",
+        project_id: project.id,
+      });
+      const fact = await recordFact(ctx, {
+        statement: "project-scoped fact",
+        project_id: project.id,
+      });
+      const doc = await addDocument(ctx, {
+        title: "project-scoped doc",
+        content: "scoped document",
+        project_id: project.id,
+      });
+      const point = await recordTimeSeriesPoint(ctx, {
+        series_key: "project.deletion",
+        value: 1,
+        project_id: project.id,
+      });
+
+      // Verify project_id is set on all objects
+      const db = createDb(env.DB);
+      const loadProjectId = async (
+        table:
+          | typeof thoughts
+          | typeof tasks
+          | typeof facts
+          | typeof documents
+          | typeof timeSeriesPoints,
+        id: string,
+      ) =>
+        (await db.select({ pid: table.projectId }).from(table).where(eq(table.id, id)).limit(1))[0]
+          ?.pid;
+      expect(await loadProjectId(thoughts, thought.id)).toBe(project.id);
+      expect(await loadProjectId(tasks, task.id)).toBe(project.id);
+      expect(await loadProjectId(facts, fact.id)).toBe(project.id);
+      expect(await loadProjectId(documents, doc.id)).toBe(project.id);
+      expect(await loadProjectId(timeSeriesPoints, point.id)).toBe(project.id);
+
+      // Delete via MCP tool
+      const delResult = await callMcpTool<{ ok: boolean }>("delete_project", { id: project.id });
+      expect(delResult).toEqual({ ok: true });
+
+      // Verify project is gone
+      expect(
+        (
+          await db
+            .select({ id: projects.id })
+            .from(projects)
+            .where(eq(projects.id, project.id))
+            .limit(1)
+        )[0],
+      ).toBeUndefined();
+
+      // Verify all objects still exist but have project_id = null
+      expect(await loadProjectId(thoughts, thought.id)).toBeNull();
+      expect(await loadProjectId(tasks, task.id)).toBeNull();
+      expect(await loadProjectId(facts, fact.id)).toBeNull();
+      expect(await loadProjectId(documents, doc.id)).toBeNull();
+      expect(await loadProjectId(timeSeriesPoints, point.id)).toBeNull();
+    });
+
+    it("rejects cross-owner project deletion with 404", async () => {
+      const ctxA = {
+        env,
+        user: { id: "user-memory-a", name: "Memory A" },
+        source: "test:unit",
+      };
+      const project = await createProject(ctxA, { name: "Cross-owner target" });
+
+      // User B tries to delete
+      const res = await authFetch(`/api/v1/projects/${project.id}`, { method: "DELETE" }, TOKEN_B);
+      expect(res.status).toBe(404);
+
+      // Verify project still exists
+      const db = createDb(env.DB);
+      expect(
+        (
+          await db
+            .select({ id: projects.id })
+            .from(projects)
+            .where(eq(projects.id, project.id))
+            .limit(1)
+        )[0],
+      ).toBeDefined();
+    });
+
+    it("returns 404 for non-existent project id", async () => {
+      const res = await authFetch("/api/v1/projects/nonexistent-id", { method: "DELETE" }, TOKEN_A);
+      expect(res.status).toBe(404);
+    });
+
+    it("rejects cross-owner deletion via MCP tool", async () => {
+      const ctxA = {
+        env,
+        user: { id: "user-memory-a", name: "Memory A" },
+        source: "test:unit",
+      };
+      const project = await createProject(ctxA, { name: "MCP cross-owner target" });
+
+      // User B tries via MCP
+      const raw = await callMcpToolRaw("delete_project", { id: project.id }, TOKEN_B);
+      expect(raw.result?.isError).toBe(true);
+      expect(raw.result?.content?.[0]?.text).toContain("not found");
     });
   });
 });

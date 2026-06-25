@@ -23,6 +23,7 @@ import {
   deleteDependency,
   deleteDocument,
   deleteFact,
+  deleteProject,
   deleteThought,
   documentWriteModes,
   getChunksForDocument,
@@ -129,6 +130,10 @@ apiRoutes.get(
 apiRoutes.post(
   "/projects",
   route(async (c) => c.json(await createProject(ctx(c), (await body(c)) as { name: string }), 201)),
+);
+apiRoutes.delete(
+  "/projects/:id",
+  route(async (c) => c.json(await deleteProject(ctx(c), param(c, "id")))),
 );
 
 apiRoutes.get(

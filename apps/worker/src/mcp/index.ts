@@ -22,6 +22,7 @@ import {
   createProject,
   createTask,
   deleteDependency,
+  deleteProject,
   getDocumentVersionForMcp,
   linkThought,
   listDependencies,
@@ -548,6 +549,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       (args) => createProject(this.memoryCtx(), args as Parameters<typeof createProject>[1]),
     );
     register("list_projects", "List projects.", {}, () => listProjects(this.memoryCtx()));
+    register(
+      "delete_project",
+      "Delete a project and unlink all owned objects from it.",
+      { id: z.string() },
+      (args) => deleteProject(this.memoryCtx(), String(args.id)),
+    );
     register(
       "link",
       "Link a thought to global people or owned tasks, facts, documents, and time-series points.",

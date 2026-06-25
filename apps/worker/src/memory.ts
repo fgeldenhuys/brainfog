@@ -1298,6 +1298,43 @@ export async function listProjects(ctx: Ctx) {
     .orderBy(projects.name);
 }
 
+export async function deleteProject(ctx: Ctx, id: string) {
+  const db = createDb(ctx.env.DB);
+  const project = (
+    await db
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(eq(projects.id, id), eq(projects.ownerId, ctx.user.id)))
+      .limit(1)
+  )[0];
+  if (!project) throw new MemoryError(404, "project not found");
+
+  const statements = [
+    ctx.env.DB.prepare(
+      `update thoughts set project_id = null where project_id = ? and owner_id = ?`,
+    ).bind(id, ctx.user.id),
+    ctx.env.DB.prepare(
+      `update tasks set project_id = null where project_id = ? and owner_id = ?`,
+    ).bind(id, ctx.user.id),
+    ctx.env.DB.prepare(
+      `update facts set project_id = null where project_id = ? and owner_id = ?`,
+    ).bind(id, ctx.user.id),
+    ctx.env.DB.prepare(
+      `update documents set project_id = null where project_id = ? and owner_id = ?`,
+    ).bind(id, ctx.user.id),
+    ctx.env.DB.prepare(
+      `update time_series_points set project_id = null where project_id = ? and owner_id = ?`,
+    ).bind(id, ctx.user.id),
+    ctx.env.DB.prepare(
+      `delete from dependency_edges where owner_id = ? and (dependent_id = ? or dependency_id = ?)`,
+    ).bind(ctx.user.id, id, id),
+    ctx.env.DB.prepare(`delete from projects where id = ?`).bind(id),
+  ];
+
+  await ctx.env.DB.batch(statements);
+  return { ok: true };
+}
+
 export async function upsertPerson(
   ctx: Ctx,
   input: {
