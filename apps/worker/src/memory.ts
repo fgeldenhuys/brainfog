@@ -2032,6 +2032,97 @@ export async function createDocumentFromBytes(
   return row;
 }
 
+export async function updateDocumentFromBytes(
+  ctx: Ctx,
+  id: string,
+  bytes: ArrayBuffer,
+  write_mode?: DocumentWriteMode,
+  mime_type?: string | null,
+  filename?: string | null,
+) {
+  const db = createDb(ctx.env.DB);
+  const doc = await getOwnedDocument(ctx, id);
+  const writeMode = documentWriteMode(write_mode);
+
+  if (bytes.byteLength > directDocumentUploadMaxBytes) {
+    throw new MemoryError(400, "document upload exceeds 25 MiB limit");
+  }
+
+  const callerProvidedMimeType = typeof mime_type === "string" && mime_type.trim().length > 0;
+  const mimeType = callerProvidedMimeType ? validateMimeType(mime_type) : doc.mimeType;
+
+  // Decode text-like content before any R2/D1 writes so invalid UTF-8
+  // fails with 400 and leaves no stored state.
+  let decodedText: string | undefined;
+  if (isTextLikeMimeType(mimeType)) {
+    decodedText = decodeUtf8(bytes);
+  }
+
+  if (writeMode === "create_version") {
+    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
+    const currentObject = await ctx.env.DOCUMENTS.get(doc.r2Key);
+    if (!currentObject) throw new MemoryError(404, "document content not found");
+    const previousBytes = await currentObject.arrayBuffer();
+    await ctx.env.DOCUMENTS.put(historicalKey, previousBytes, {
+      httpMetadata: { contentType: doc.mimeType },
+      customMetadata: currentObject.customMetadata,
+    });
+    await db.insert(documentVersions).values({
+      id: createId("documentVersion"),
+      documentId: doc.id,
+      ownerId: doc.ownerId,
+      source: source(ctx),
+      versionNumber: doc.currentVersionNumber,
+      r2Key: historicalKey,
+      mimeType: doc.mimeType,
+      sizeBytes: doc.sizeBytes ?? previousBytes.byteLength,
+    });
+  }
+
+  await markDownstreamStale(ctx, "document", id);
+
+  const oldChunks = await db
+    .select({ id: documentChunks.id })
+    .from(documentChunks)
+    .where(eq(documentChunks.documentId, id));
+
+  await cleanDocumentChunkGraphEdges(
+    ctx,
+    id,
+    oldChunks.map((c) => c.id),
+    { staleReason: "document_chunks_replaced" },
+  );
+  await deleteVectors(
+    ctx,
+    oldChunks.map((c) => c.id),
+  );
+  await db.delete(documentChunks).where(eq(documentChunks.documentId, id));
+
+  await ctx.env.DOCUMENTS.put(doc.r2Key, bytes, {
+    httpMetadata: { contentType: mimeType },
+    customMetadata: filename ? { filename: safeFilename(filename) } : undefined,
+  });
+
+  const updateFields: Record<string, unknown> = {
+    sizeBytes: bytes.byteLength,
+    currentVersionNumber:
+      writeMode === "create_version" ? doc.currentVersionNumber + 1 : doc.currentVersionNumber,
+    updatedAt: now(),
+  };
+  if (callerProvidedMimeType) {
+    updateFields.mimeType = mimeType;
+  }
+  await db.update(documents).set(updateFields).where(eq(documents.id, id));
+
+  if (decodedText !== undefined) {
+    await insertChunks(ctx, id, decodedText, doc.projectId, doc.shared);
+  }
+
+  const updated = (await db.select().from(documents).where(eq(documents.id, id)))[0];
+  if (!updated) throw new MemoryError(500, "updated document not found");
+  return updated;
+}
+
 export async function getDocumentBytes(ctx: Ctx, id: string) {
   const doc = (
     await createDb(ctx.env.DB)
@@ -2086,8 +2177,50 @@ function transferPath(path: string, params: Record<string, string | undefined>) 
 
 export async function createDocumentUploadLink(
   ctx: Ctx,
-  input: { title: string; filename?: string; mime_type?: string; project_id?: string },
+  input: {
+    title?: string;
+    filename?: string;
+    mime_type?: string;
+    project_id?: string;
+    document_id?: string;
+    write_mode?: string;
+  },
 ) {
+  if (input.document_id) {
+    // Update mode: target an existing document
+    if (input.project_id !== undefined)
+      throw new MemoryError(400, "project_id is not accepted when updating an existing document");
+    const doc = await getOwnedDocument(ctx, input.document_id);
+    if (input.title !== undefined)
+      throw new MemoryError(400, "title is not accepted when updating an existing document");
+    const writeMode = documentWriteMode(input.write_mode);
+    const callerProvidedMimeType =
+      typeof input.mime_type === "string" && input.mime_type.trim().length > 0;
+    const responseMimeType = callerProvidedMimeType
+      ? validateMimeType(input.mime_type)
+      : doc.mimeType;
+    const path = transferPath(`/api/v1/documents/${doc.id}/direct-upload`, {
+      filename: input.filename,
+      mime_type: callerProvidedMimeType ? responseMimeType : undefined,
+      write_mode: writeMode === "overwrite_current" ? undefined : writeMode,
+    });
+    return {
+      url: path,
+      method: "PATCH",
+      headers: {
+        Authorization: "Bearer <your existing brainfog bearer token>",
+        "Content-Type": responseMimeType,
+      },
+      expires_at: null,
+      max_size_bytes: directDocumentUploadMaxBytes,
+      notes:
+        "Upload raw file bytes to this authenticated REST endpoint to update an existing document. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
+      command_example:
+        'curl -X PATCH "$BRAINFOG_BASE_URL/api/v1/documents/<document-id>/direct-upload?mime_type=<mime-type>&filename=<filename>&write_mode=create_version" -H "Authorization: Bearer $BRAINFOG_TOKEN" -H "Content-Type: <mime-type>" --data-binary @<path-to-file>',
+    };
+  }
+
+  // Create mode: create a new document (existing behavior)
   if (!input.title?.trim()) throw new MemoryError(400, "missing title");
   const projectId = optionalProjectId(input.project_id);
   await ensureProject(ctx, projectId);
@@ -2284,7 +2417,9 @@ export async function updateDocument(
   if (isTextLikeMimeType(doc.mimeType)) {
     await insertChunks(ctx, id, content, doc.projectId, doc.shared);
   }
-  return (await db.select().from(documents).where(eq(documents.id, id)))[0];
+  const updated = (await db.select().from(documents).where(eq(documents.id, id)))[0];
+  if (!updated) throw new MemoryError(500, "updated document not found");
+  return updated;
 }
 
 export async function getDocumentContent(ctx: Ctx, id: string) {

@@ -299,18 +299,32 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "create_document_upload_link",
-      "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never through MCP tool arguments or outputs.",
+      "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never returned inline through MCP. Provide a document_id to update an existing document (optionally with versioning); omit document_id to create a new document (title is required for create, rejected for update).",
       {
-        title: z.string(),
+        title: z.string().optional(),
         filename: z.string().optional(),
         mime_type: z.string().optional(),
         project_id: projectId,
+        document_id: z
+          .string()
+          .describe(
+            "Existing document ID to update. When provided, title must not be supplied and write_mode controls versioning.",
+          )
+          .optional(),
+        write_mode: documentWriteMode,
       },
-      (args) =>
-        createDocumentUploadLink(
+      (args) => {
+        const hasDocId = Boolean(args.document_id);
+        const hasTitle = Boolean(args.title);
+        if (hasDocId && hasTitle)
+          throw new MemoryError(400, "title is not accepted when updating an existing document");
+        if (!hasDocId && !hasTitle)
+          throw new MemoryError(400, "missing title (required when creating a new document)");
+        return createDocumentUploadLink(
           this.memoryCtx(),
           args as Parameters<typeof createDocumentUploadLink>[1],
-        ),
+        );
+      },
     );
     register(
       "create_document_download_link",

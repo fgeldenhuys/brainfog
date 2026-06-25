@@ -51,6 +51,7 @@ import {
   setSelfPerson,
   setShared,
   updateDocument,
+  updateDocumentFromBytes,
   updateFact,
   updateTask,
   upsertPerson,
@@ -229,6 +230,38 @@ apiRoutes.post(
     );
   }),
 );
+apiRoutes.patch(
+  "/documents/:id/direct-upload",
+  route(async (c) => {
+    const title = c.req.query("title") ?? c.req.header("x-brainfog-document-title");
+    const projectId = c.req.query("project_id") ?? c.req.header("x-brainfog-project-id");
+    if (title !== null && title !== undefined)
+      throw new MemoryError(400, "title is not accepted when updating an existing document");
+    if (projectId !== null && projectId !== undefined)
+      throw new MemoryError(400, "project_id is not accepted when updating an existing document");
+    // Reject client-supplied provenance fields
+    for (const field of ["owner_id", "source", "r2_key", "created_at", "updated_at"]) {
+      const value = c.req.query(field) ?? c.req.header(`x-brainfog-${field}`);
+      if (value !== null && value !== undefined)
+        throw new MemoryError(400, `${field} is not accepted when updating an existing document`);
+    }
+    const mimeType =
+      c.req.query("mime_type") ??
+      c.req.header("x-brainfog-mime-type") ??
+      c.req.header("content-type");
+    const filename = c.req.query("filename") ?? c.req.header("x-brainfog-filename") ?? undefined;
+    const rawWriteMode = c.req.query("write_mode") ?? c.req.header("x-brainfog-write-mode");
+    const writeMode = rawWriteMode as Parameters<typeof updateDocumentFromBytes>[3] | undefined;
+    if (writeMode !== undefined && !(documentWriteModes as readonly string[]).includes(writeMode)) {
+      throw new MemoryError(400, "invalid document write_mode");
+    }
+    const bytes = await c.req.arrayBuffer();
+    return c.json(
+      await updateDocumentFromBytes(ctx(c), param(c, "id"), bytes, writeMode, mimeType, filename),
+    );
+  }),
+);
+
 apiRoutes.patch(
   "/documents/:id",
   route(async (c) => {
