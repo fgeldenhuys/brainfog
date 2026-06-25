@@ -1,5 +1,12 @@
 import { applyD1Migrations, env, SELF } from "cloudflare:test";
-import { createDb, ingestionRuns, timeSeriesPoints, tokens, users } from "@brainfog/db";
+import {
+  createDb,
+  ingestionConnectors,
+  ingestionRuns,
+  timeSeriesPoints,
+  tokens,
+  users,
+} from "@brainfog/db";
 import { hashToken } from "@brainfog/shared";
 import { and, eq, inArray } from "drizzle-orm";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -360,6 +367,10 @@ describe("Garmin connector", () => {
   it("scheduled dispatch runs once per active Garmin connector with isolated credentials", async () => {
     const a = await createConnector(TOKEN_A, "garmin", "active");
     const b = await createConnector(TOKEN_B, "garmin", "active");
+    await createDb(env.DB)
+      .update(ingestionConnectors)
+      .set({ cursor: { from: "2026-06-01", to: "2026-06-23", synced_at: "2026-06-24T00:00:00Z" } })
+      .where(eq(ingestionConnectors.id, a.id));
 
     await authFetch(`/api/v1/ingestion/connectors/${a.id}/credentials`, {
       method: "PUT",
@@ -380,11 +391,19 @@ describe("Garmin connector", () => {
       TOKEN_B,
     );
 
-    const seen: Array<{ connectorId: string; username: unknown }> = [];
+    const seen: Array<{
+      connectorId: string;
+      username: unknown;
+      cursor: Record<string, unknown> | null;
+    }> = [];
     const result = await dispatchScheduledGarminRuns(
       { env },
       async (_ctx, connector, credentials) => {
-        seen.push({ connectorId: connector.id, username: credentials.username });
+        seen.push({
+          connectorId: connector.id,
+          username: credentials.username,
+          cursor: connector.cursor,
+        });
         return {
           ...garminPayload(),
           activities: [
@@ -404,10 +423,14 @@ describe("Garmin connector", () => {
     expect(result.connector_count).toBeGreaterThanOrEqual(2);
     expect(seen).toEqual(
       expect.arrayContaining([
-        { connectorId: a.id, username: "alice@example.com" },
-        { connectorId: b.id, username: "bob@example.com" },
+        expect.objectContaining({ connectorId: a.id, username: "alice@example.com" }),
+        expect.objectContaining({ connectorId: b.id, username: "bob@example.com" }),
       ]),
     );
+    expect(seen.find((item) => item.connectorId === a.id)?.cursor).toMatchObject({
+      from: "2026-06-22",
+      to: new Date().toISOString().slice(0, 10),
+    });
     expect(
       result.results.map((item) => (item.run as { insertedCount: number }).insertedCount),
     ).toEqual([17, 17]);

@@ -113,6 +113,31 @@ function unixSeconds(value: Date) {
   return Math.floor(value.getTime() / 1000);
 }
 
+function utcDateString(date = new Date()) {
+  return date.toISOString().slice(0, 10);
+}
+
+function addUtcDays(dateText: string, days: number) {
+  const date = new Date(`${dateText}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  date.setUTCDate(date.getUTCDate() + days);
+  return utcDateString(date);
+}
+
+function prepareGarminRunConnector(connector: {
+  id: string;
+  cursor: Record<string, unknown> | null;
+}) {
+  const cursor = connector.cursor;
+  if (!cursor?.synced_at || typeof cursor.to !== "string") return connector;
+  const today = utcDateString();
+  if (cursor.to >= today) return connector;
+  const overlapFrom = addUtcDays(cursor.to, -1) ?? cursor.to;
+  const oldestFrom = addUtcDays(today, -30) ?? today;
+  const from = overlapFrom < oldestFrom ? oldestFrom : overlapFrom;
+  return { ...connector, cursor: { ...cursor, from, to: today } };
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -559,7 +584,11 @@ async function runnerWithCredentials(
   runner: GarminRunner,
 ) {
   const credentials = await decryptConnectorCredentials(ctx, connector.id);
-  return runner(ctx, connector, credentials.payload as Record<string, unknown>);
+  return runner(
+    ctx,
+    prepareGarminRunConnector(connector),
+    credentials.payload as Record<string, unknown>,
+  );
 }
 
 async function recordFailedScheduledGarminRun(
@@ -626,7 +655,7 @@ export async function dispatchScheduledGarminRuns(
       secretSource = credentials.payload;
       const runnerPayload = await runner(
         runCtx,
-        row.connector,
+        prepareGarminRunConnector(row.connector),
         credentials.payload as Record<string, unknown>,
       );
       const run = await recordGarminRunnerPayload(runCtx, row.connector.id, runnerPayload, {
