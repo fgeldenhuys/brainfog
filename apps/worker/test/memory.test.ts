@@ -910,6 +910,97 @@ describe("memory model REST service", () => {
     expect(recalledOld.some((r) => r.kind === "document_chunk")).toBe(false);
   });
 
+  it("parallel text create_version updates never leak duplicate-version uniqueness failures", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Parallel text", content: "parallel base text" }),
+      }),
+    );
+
+    const responses = await Promise.all([
+      authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "parallel text a", write_mode: "create_version" }),
+      }),
+      authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "parallel text b", write_mode: "create_version" }),
+      }),
+    ]);
+
+    const statuses = responses.map((response) => response.status).sort((a, b) => a - b);
+    expect(
+      statuses.length === 2 &&
+        ((statuses[0] === 200 && statuses[1] === 200) ||
+          (statuses[0] === 200 && statuses[1] === 409)),
+    ).toBe(true);
+
+    for (const response of responses.filter((item) => item.status === 409)) {
+      expect(await response.json()).toEqual({
+        error: "document changed while updating; retry the update",
+      });
+    }
+
+    const versions = await json<Array<{ version_number: number }>>(
+      await authFetch(`/api/v1/documents/${doc.id}/versions`),
+    );
+    const versionNumbers = versions.map((version) => version.version_number);
+    expect(new Set(versionNumbers).size).toBe(versionNumbers.length);
+
+    const original = await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`);
+    expect(original.status).toBe(200);
+    expect(await original.text()).toContain("parallel base text");
+
+    if (statuses[0] === 200 && statuses[1] === 200) {
+      const priorCurrent = await authFetch(`/api/v1/documents/${doc.id}/versions/2/content`);
+      expect(priorCurrent.status).toBe(200);
+      expect(["parallel text a", "parallel text b"]).toContain(await priorCurrent.text());
+    }
+  });
+
+  it("parallel text overwrite_current and create_version never mutate a historical version in place", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch("/api/v1/documents", {
+        method: "POST",
+        body: JSON.stringify({ title: "Mixed text", content: "mixed base text" }),
+      }),
+    );
+
+    const responses = await Promise.all([
+      authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "mixed overwrite text", write_mode: "overwrite_current" }),
+      }),
+      authFetch(`/api/v1/documents/${doc.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: "mixed version text", write_mode: "create_version" }),
+      }),
+    ]);
+
+    const statuses = responses.map((response) => response.status).sort((a, b) => a - b);
+    expect(
+      statuses.length === 2 &&
+        ((statuses[0] === 200 && statuses[1] === 200) ||
+          (statuses[0] === 200 && statuses[1] === 409)),
+    ).toBe(true);
+
+    for (const response of responses.filter((item) => item.status === 409)) {
+      expect(await response.json()).toEqual({
+        error: "document changed while updating; retry the update",
+      });
+    }
+
+    const versions = await json<Array<{ version_number: number; is_current?: boolean }>>(
+      await authFetch(`/api/v1/documents/${doc.id}/versions`),
+    );
+    if (versions.some((version) => version.version_number === 1 && !version.is_current)) {
+      const historical = await authFetch(`/api/v1/documents/${doc.id}/versions/1/content`);
+      expect(historical.status).toBe(200);
+      expect(["mixed base text", "mixed overwrite text"]).toContain(await historical.text());
+    }
+  });
+
   it("deleting a versioned document cascades version rows and removes historical R2 bytes", async () => {
     const doc = await json<{ id: string }>(
       await authFetch("/api/v1/documents", {
@@ -1210,6 +1301,120 @@ describe("memory model REST service", () => {
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
   });
 
+  it("parallel binary create_version updates never leak duplicate-version uniqueness failures", async () => {
+    const doc = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=Parallel%20Binary&mime_type=application%2Foctet-stream",
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: new Uint8Array([0x01, 0x02, 0x03]),
+        },
+      ),
+    );
+
+    const responses = await Promise.all([
+      authFetch(`/api/v1/documents/${doc.id}/direct-upload?write_mode=create_version`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Uint8Array([0x04, 0x05]),
+      }),
+      authFetch(`/api/v1/documents/${doc.id}/direct-upload?write_mode=create_version`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Uint8Array([0x06, 0x07]),
+      }),
+    ]);
+
+    const statuses = responses.map((response) => response.status).sort((a, b) => a - b);
+    expect(
+      statuses.length === 2 &&
+        ((statuses[0] === 200 && statuses[1] === 200) ||
+          (statuses[0] === 200 && statuses[1] === 409)),
+    ).toBe(true);
+
+    for (const response of responses.filter((item) => item.status === 409)) {
+      expect(await response.json()).toEqual({
+        error: "document changed while updating; retry the update",
+      });
+    }
+
+    const versions = await json<Array<{ version_number: number }>>(
+      await authFetch(`/api/v1/documents/${doc.id}/versions`),
+    );
+    const versionNumbers = versions.map((version) => version.version_number);
+    expect(new Set(versionNumbers).size).toBe(versionNumbers.length);
+
+    const original = await authFetch(`/api/v1/documents/${doc.id}/versions/1/download`);
+    expect(original.status).toBe(200);
+    expect(new Uint8Array(await original.arrayBuffer())).toEqual(
+      new Uint8Array([0x01, 0x02, 0x03]),
+    );
+
+    if (statuses[0] === 200 && statuses[1] === 200) {
+      const priorCurrent = await authFetch(`/api/v1/documents/${doc.id}/versions/2/download`);
+      expect(priorCurrent.status).toBe(200);
+      expect([
+        JSON.stringify(Array.from(new Uint8Array([0x04, 0x05]))),
+        JSON.stringify(Array.from(new Uint8Array([0x06, 0x07]))),
+      ]).toContain(JSON.stringify(Array.from(new Uint8Array(await priorCurrent.arrayBuffer()))));
+    }
+  });
+
+  it("parallel binary overwrite_current and create_version never mutate a historical version in place", async () => {
+    const baseBytes = new Uint8Array([0x21, 0x22, 0x23]);
+    const overwriteBytes = new Uint8Array([0x31, 0x32]);
+    const versionBytes = new Uint8Array([0x41, 0x42]);
+    const doc = await json<{ id: string }>(
+      await authFetch(
+        "/api/v1/documents/direct-upload?title=Mixed%20Binary&mime_type=application%2Foctet-stream",
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: baseBytes,
+        },
+      ),
+    );
+
+    const responses = await Promise.all([
+      authFetch(`/api/v1/documents/${doc.id}/direct-upload?write_mode=overwrite_current`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: overwriteBytes,
+      }),
+      authFetch(`/api/v1/documents/${doc.id}/direct-upload?write_mode=create_version`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: versionBytes,
+      }),
+    ]);
+
+    const statuses = responses.map((response) => response.status).sort((a, b) => a - b);
+    expect(
+      statuses.length === 2 &&
+        ((statuses[0] === 200 && statuses[1] === 200) ||
+          (statuses[0] === 200 && statuses[1] === 409)),
+    ).toBe(true);
+
+    for (const response of responses.filter((item) => item.status === 409)) {
+      expect(await response.json()).toEqual({
+        error: "document changed while updating; retry the update",
+      });
+    }
+
+    const versions = await json<Array<{ version_number: number; is_current?: boolean }>>(
+      await authFetch(`/api/v1/documents/${doc.id}/versions`),
+    );
+    if (versions.some((version) => version.version_number === 1 && !version.is_current)) {
+      const historical = await authFetch(`/api/v1/documents/${doc.id}/versions/1/download`);
+      expect(historical.status).toBe(200);
+      expect([
+        JSON.stringify(Array.from(baseBytes)),
+        JSON.stringify(Array.from(overwriteBytes)),
+      ]).toContain(JSON.stringify(Array.from(new Uint8Array(await historical.arrayBuffer()))));
+    }
+  });
+
   it("PATCH /documents/:id/direct-upload rejects title and project_id with 400", async () => {
     const doc = await json<{ id: string }>(
       await authFetch("/api/v1/documents/direct-upload?title=Reject%20Meta&mime_type=text/plain", {
@@ -1504,7 +1709,10 @@ describe("memory model REST service", () => {
       "updated.txt",
     );
 
-    const object = await env.DOCUMENTS.get(doc.r2Key);
+    const current = (
+      await createDb(env.DB).select().from(documents).where(eq(documents.id, doc.id)).limit(1)
+    )[0];
+    const object = current ? await env.DOCUMENTS.get(current.r2Key) : null;
     expect(object).not.toBeNull();
     expect(object?.customMetadata?.filename).toBe("updated.txt");
   });
@@ -1521,7 +1729,10 @@ describe("memory model REST service", () => {
     const newBytes = new TextEncoder().encode("updated").buffer as ArrayBuffer;
     await updateDocumentFromBytes(ctx, doc.id, newBytes, "overwrite_current", "text/plain");
 
-    const object = await env.DOCUMENTS.get(doc.r2Key);
+    const current = (
+      await createDb(env.DB).select().from(documents).where(eq(documents.id, doc.id)).limit(1)
+    )[0];
+    const object = current ? await env.DOCUMENTS.get(current.r2Key) : null;
     expect(object).not.toBeNull();
     // When no filename is provided, custom metadata is not set on put, so existing metadata might be lost
     // This is acceptable per Intent Preservation - metadata mutation is out of scope.

@@ -112,7 +112,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       })
       .nullable()
       .optional();
-    const documentWriteMode = z.enum(["overwrite_current", "create_version"]).optional();
+    const documentWriteMode = z
+      .enum(["overwrite_current", "create_version"])
+      .describe(
+        "Choose overwrite_current to replace the current version in place, or create_version to create a new current version. Brainfog assigns the next version number automatically.",
+      )
+      .optional();
 
     // Register prompts for agent guidance on memory usage
     this.server.prompt(
@@ -267,7 +272,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "update_document",
-      "Replace a document's current content and regenerate current chunks. write_mode='overwrite_current' (default for compatibility) creates no history; write_mode='create_version' preserves the outgoing current content as a historical R2-backed version before replacing it.",
+      "Replace a document's current content and regenerate current chunks. Choose write_mode='overwrite_current' to replace the current version in place, or write_mode='create_version' to create a new current version; brainfog assigns the next version number automatically while preserving the outgoing current content as a historical R2-backed version.",
       { id: z.string(), content: z.string(), write_mode: documentWriteMode, derived_from: obj },
       (args) =>
         updateDocument(
@@ -300,7 +305,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
     );
     register(
       "create_document_upload_link",
-      "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never returned inline through MCP. Provide a document_id to update an existing document (optionally with versioning); omit document_id to create a new document (title is required for create, rejected for update).",
+      "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never returned inline through MCP. Provide a document_id to update an existing document and choose whether to overwrite the current version or create a new one; brainfog assigns the next version number automatically. Omit document_id to create a new document (title is required for create, rejected for update).",
       {
         title: z.string().optional(),
         filename: z.string().optional(),
@@ -309,7 +314,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         document_id: z
           .string()
           .describe(
-            "Existing document ID to update. When provided, title must not be supplied and write_mode controls versioning.",
+            "Existing document ID to update. When provided, title must not be supplied and write_mode chooses whether to overwrite the current version or create a new version with an automatically assigned number.",
           )
           .optional(),
         write_mode: documentWriteMode,

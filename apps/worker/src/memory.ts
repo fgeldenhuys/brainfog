@@ -1973,6 +1973,116 @@ function safeVersionMetadata<T extends { r2Key?: string }>(row: T) {
   return safe;
 }
 
+async function replaceCurrentDocumentPointer(
+  ctx: Ctx,
+  doc: Pick<typeof documents.$inferSelect, "id" | "ownerId" | "r2Key" | "currentVersionNumber">,
+  nextCurrent: { r2Key: string; mimeType: string; sizeBytes: number | null },
+) {
+  const result = await ctx.env.DB.prepare(
+    `update documents
+       set r2_key = ?, mime_type = ?, size_bytes = ?, updated_at = unixepoch()
+       where id = ? and owner_id = ? and current_version_number = ? and r2_key = ?`,
+  )
+    .bind(
+      nextCurrent.r2Key,
+      nextCurrent.mimeType,
+      nextCurrent.sizeBytes,
+      doc.id,
+      doc.ownerId,
+      doc.currentVersionNumber,
+      doc.r2Key,
+    )
+    .run();
+  if ((result.meta.changes ?? 0) !== 1) {
+    throw new MemoryError(409, "document changed while updating; retry the update");
+  }
+}
+
+async function promoteCurrentDocumentToHistoricalVersion(
+  ctx: Ctx,
+  doc: Pick<
+    typeof documents.$inferSelect,
+    "id" | "ownerId" | "r2Key" | "mimeType" | "sizeBytes" | "currentVersionNumber"
+  >,
+  nextCurrent: { r2Key: string; mimeType: string; sizeBytes: number | null },
+  historicalR2Key: string,
+) {
+  const versionId = createId("documentVersion");
+  const results = await ctx.env.DB.batch([
+    ctx.env.DB.prepare(
+      `update documents
+         set r2_key = ?,
+             mime_type = ?,
+             size_bytes = ?,
+             current_version_number = current_version_number + 1,
+             updated_at = unixepoch()
+         where id = ? and owner_id = ? and current_version_number = ? and r2_key = ?`,
+    ).bind(
+      nextCurrent.r2Key,
+      nextCurrent.mimeType,
+      nextCurrent.sizeBytes,
+      doc.id,
+      doc.ownerId,
+      doc.currentVersionNumber,
+      doc.r2Key,
+    ),
+    ctx.env.DB.prepare(
+      `insert into document_versions (
+         id,
+         document_id,
+         owner_id,
+         source,
+         version_number,
+         r2_key,
+         mime_type,
+         size_bytes,
+         created_at
+       )
+       select ?, ?, ?, ?, ?, ?, ?, ?, unixepoch()
+       where exists (
+         select 1
+           from documents
+          where id = ? and owner_id = ? and current_version_number = ? and r2_key = ?
+       )`,
+    ).bind(
+      versionId,
+      doc.id,
+      doc.ownerId,
+      source(ctx),
+      doc.currentVersionNumber,
+      historicalR2Key,
+      doc.mimeType,
+      doc.sizeBytes,
+      doc.id,
+      doc.ownerId,
+      doc.currentVersionNumber + 1,
+      nextCurrent.r2Key,
+    ),
+  ]);
+  if ((results[0]?.meta.changes ?? 0) !== 1 || (results[1]?.meta.changes ?? 0) !== 1) {
+    throw new MemoryError(409, "document changed while updating; retry the update");
+  }
+}
+
+async function deleteDocumentChunksIfCurrent(
+  ctx: Ctx,
+  doc: Pick<typeof documents.$inferSelect, "id" | "ownerId">,
+  r2Key: string,
+) {
+  const result = await ctx.env.DB.prepare(
+    `delete from document_chunks
+       where document_id = ?
+         and exists (
+           select 1
+             from documents
+            where id = ? and owner_id = ? and r2_key = ?
+         )`,
+  )
+    .bind(doc.id, doc.id, doc.ownerId, r2Key)
+    .run();
+  return (result.meta.changes ?? 0) > 0;
+}
+
 function isTextLikeMimeType(mimeType: string) {
   const value = mimeType.toLowerCase().split(";")[0]?.trim() ?? "";
   return (
@@ -2016,6 +2126,11 @@ function validateMimeType(mimeType: string | null | undefined): string {
 function safeFilename(value?: string | null) {
   const cleaned = (value ?? "document").replace(/[\\/\r\n\0"]/g, "_").trim();
   return cleaned || "document";
+}
+
+function nextCurrentDocumentR2Key(ctx: Ctx, documentId: string, mimeType: string) {
+  const extension = isTextLikeMimeType(mimeType) ? ".txt" : ".bin";
+  return `${ctx.user.id}/${documentId}/current-${createId("documentVersion")}${extension}`;
 }
 
 export async function createDocumentFromBytes(
@@ -2096,24 +2211,109 @@ export async function updateDocumentFromBytes(
   }
 
   if (writeMode === "create_version") {
-    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
     const currentObject = await ctx.env.DOCUMENTS.get(doc.r2Key);
-    if (!currentObject) throw new MemoryError(404, "document content not found");
+    if (!currentObject) {
+      throw new MemoryError(404, "document content not found");
+    }
+    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
     const previousBytes = await currentObject.arrayBuffer();
     await ctx.env.DOCUMENTS.put(historicalKey, previousBytes, {
       httpMetadata: { contentType: doc.mimeType },
       customMetadata: currentObject.customMetadata,
     });
-    await db.insert(documentVersions).values({
-      id: createId("documentVersion"),
-      documentId: doc.id,
-      ownerId: doc.ownerId,
-      source: source(ctx),
-      versionNumber: doc.currentVersionNumber,
-      r2Key: historicalKey,
-      mimeType: doc.mimeType,
-      sizeBytes: doc.sizeBytes ?? previousBytes.byteLength,
+
+    const nextR2Key = nextCurrentDocumentR2Key(ctx, id, mimeType);
+    await ctx.env.DOCUMENTS.put(nextR2Key, bytes, {
+      httpMetadata: { contentType: mimeType },
+      customMetadata: filename ? { filename: safeFilename(filename) } : undefined,
     });
+
+    try {
+      await promoteCurrentDocumentToHistoricalVersion(
+        ctx,
+        doc,
+        {
+          r2Key: nextR2Key,
+          mimeType,
+          sizeBytes: bytes.byteLength,
+        },
+        historicalKey,
+      );
+    } catch (error) {
+      await Promise.all([
+        ctx.env.DOCUMENTS.delete(historicalKey),
+        ctx.env.DOCUMENTS.delete(nextR2Key),
+      ]);
+      throw error;
+    }
+
+    await ctx.env.DOCUMENTS.delete(doc.r2Key);
+
+    const currentAfterPointerSwap = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+    if (!currentAfterPointerSwap) {
+      return getOwnedDocument(ctx, id);
+    }
+
+    await markDownstreamStale(ctx, "document", id);
+
+    const oldChunks = await db
+      .select({ id: documentChunks.id })
+      .from(documentChunks)
+      .where(eq(documentChunks.documentId, id));
+
+    if (oldChunks.length > 0) {
+      const deletedCurrentChunks = await deleteDocumentChunksIfCurrent(ctx, doc, nextR2Key);
+      if (!deletedCurrentChunks) {
+        return getOwnedDocument(ctx, id);
+      }
+    }
+
+    await cleanDocumentChunkGraphEdges(
+      ctx,
+      id,
+      oldChunks.map((c) => c.id),
+      { staleReason: "document_chunks_replaced" },
+    );
+    await deleteVectors(
+      ctx,
+      oldChunks.map((c) => c.id),
+    );
+
+    const currentBeforeChunkInsert = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+    if (!currentBeforeChunkInsert) {
+      return getOwnedDocument(ctx, id);
+    }
+
+    if (decodedText !== undefined) {
+      await insertChunks(ctx, id, decodedText, doc.projectId, doc.shared);
+    }
+
+    const updated = (await db.select().from(documents).where(eq(documents.id, id)))[0];
+    if (!updated) throw new MemoryError(500, "updated document not found");
+    return updated;
+  }
+
+  const nextR2Key = nextCurrentDocumentR2Key(ctx, id, mimeType);
+  await ctx.env.DOCUMENTS.put(nextR2Key, bytes, {
+    httpMetadata: { contentType: mimeType },
+    customMetadata: filename ? { filename: safeFilename(filename) } : undefined,
+  });
+
+  try {
+    await replaceCurrentDocumentPointer(ctx, doc, {
+      r2Key: nextR2Key,
+      mimeType,
+      sizeBytes: bytes.byteLength,
+    });
+  } catch (error) {
+    await ctx.env.DOCUMENTS.delete(nextR2Key);
+    throw error;
+  }
+  await ctx.env.DOCUMENTS.delete(doc.r2Key);
+
+  const currentAfterPointerSwap = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+  if (!currentAfterPointerSwap) {
+    return getOwnedDocument(ctx, id);
   }
 
   await markDownstreamStale(ctx, "document", id);
@@ -2122,6 +2322,13 @@ export async function updateDocumentFromBytes(
     .select({ id: documentChunks.id })
     .from(documentChunks)
     .where(eq(documentChunks.documentId, id));
+
+  if (oldChunks.length > 0) {
+    const deletedCurrentChunks = await deleteDocumentChunksIfCurrent(ctx, doc, nextR2Key);
+    if (!deletedCurrentChunks) {
+      return getOwnedDocument(ctx, id);
+    }
+  }
 
   await cleanDocumentChunkGraphEdges(
     ctx,
@@ -2133,23 +2340,11 @@ export async function updateDocumentFromBytes(
     ctx,
     oldChunks.map((c) => c.id),
   );
-  await db.delete(documentChunks).where(eq(documentChunks.documentId, id));
 
-  await ctx.env.DOCUMENTS.put(doc.r2Key, bytes, {
-    httpMetadata: { contentType: mimeType },
-    customMetadata: filename ? { filename: safeFilename(filename) } : undefined,
-  });
-
-  const updateFields: Record<string, unknown> = {
-    sizeBytes: bytes.byteLength,
-    currentVersionNumber:
-      writeMode === "create_version" ? doc.currentVersionNumber + 1 : doc.currentVersionNumber,
-    updatedAt: now(),
-  };
-  if (callerProvidedMimeType) {
-    updateFields.mimeType = mimeType;
+  const currentBeforeChunkInsert = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+  if (!currentBeforeChunkInsert) {
+    return getOwnedDocument(ctx, id);
   }
-  await db.update(documents).set(updateFields).where(eq(documents.id, id));
 
   if (decodedText !== undefined) {
     await insertChunks(ctx, id, decodedText, doc.projectId, doc.shared);
@@ -2203,6 +2398,11 @@ async function getOwnedDocument(ctx: Ctx, id: string) {
   return doc;
 }
 
+async function getOwnedDocumentIfCurrent(ctx: Ctx, id: string, r2Key: string) {
+  const doc = await getOwnedDocument(ctx, id);
+  return doc.r2Key === r2Key ? doc : null;
+}
+
 function transferPath(path: string, params: Record<string, string | undefined>) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
@@ -2251,7 +2451,7 @@ export async function createDocumentUploadLink(
       expires_at: null,
       max_size_bytes: directDocumentUploadMaxBytes,
       notes:
-        "Upload raw file bytes to this authenticated REST endpoint to update an existing document. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
+        "Upload raw file bytes to this authenticated REST endpoint to update an existing document. Choose overwrite_current to replace the current version in place, or create_version to create a new current version; brainfog assigns the next version number automatically. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
       command_example:
         'curl -X PATCH "$BRAINFOG_BASE_URL/api/v1/documents/<document-id>/direct-upload?mime_type=<mime-type>&filename=<filename>&write_mode=create_version" -H "Authorization: Bearer $BRAINFOG_TOKEN" -H "Content-Type: <mime-type>" --data-binary @<path-to-file>',
     };
@@ -2400,30 +2600,120 @@ export async function updateDocument(
       : writeModeOrDerivedFrom;
   if (derivedFrom) await validateFactDerivations(ctx, id, derivedFrom);
   if (writeMode === "create_version") {
-    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
     const currentObject = await ctx.env.DOCUMENTS.get(doc.r2Key);
-    if (!currentObject) throw new MemoryError(404, "document content not found");
+    if (!currentObject) {
+      throw new MemoryError(404, "document content not found");
+    }
+    const historicalKey = `${ctx.user.id}/${id}/versions/${doc.currentVersionNumber}-${createId("documentVersion")}`;
     const previousBytes = await currentObject.arrayBuffer();
     await ctx.env.DOCUMENTS.put(historicalKey, previousBytes, {
       httpMetadata: { contentType: doc.mimeType },
       customMetadata: currentObject.customMetadata,
     });
-    await db.insert(documentVersions).values({
-      id: createId("documentVersion"),
-      documentId: doc.id,
-      ownerId: doc.ownerId,
-      source: source(ctx),
-      versionNumber: doc.currentVersionNumber,
-      r2Key: historicalKey,
-      mimeType: doc.mimeType,
-      sizeBytes: doc.sizeBytes ?? previousBytes.byteLength,
+
+    const nextR2Key = nextCurrentDocumentR2Key(ctx, id, doc.mimeType);
+    await ctx.env.DOCUMENTS.put(nextR2Key, content, {
+      httpMetadata: { contentType: doc.mimeType },
     });
+
+    try {
+      await promoteCurrentDocumentToHistoricalVersion(
+        ctx,
+        doc,
+        {
+          r2Key: nextR2Key,
+          mimeType: doc.mimeType,
+          sizeBytes: new TextEncoder().encode(content).byteLength,
+        },
+        historicalKey,
+      );
+    } catch (error) {
+      await Promise.all([
+        ctx.env.DOCUMENTS.delete(historicalKey),
+        ctx.env.DOCUMENTS.delete(nextR2Key),
+      ]);
+      throw error;
+    }
+
+    await ctx.env.DOCUMENTS.delete(doc.r2Key);
+
+    const currentAfterPointerSwap = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+    if (!currentAfterPointerSwap) {
+      return getOwnedDocument(ctx, id);
+    }
+    await markDownstreamStale(ctx, "document", id);
+    const oldChunks = await db
+      .select({ id: documentChunks.id })
+      .from(documentChunks)
+      .where(eq(documentChunks.documentId, id));
+
+    if (oldChunks.length > 0) {
+      const deletedCurrentChunks = await deleteDocumentChunksIfCurrent(ctx, doc, nextR2Key);
+      if (!deletedCurrentChunks) {
+        return getOwnedDocument(ctx, id);
+      }
+    }
+    await cleanDocumentChunkGraphEdges(
+      ctx,
+      id,
+      oldChunks.map((c) => c.id),
+      {
+        staleReason: "document_chunks_replaced",
+      },
+    );
+    await deleteVectors(
+      ctx,
+      oldChunks.map((c) => c.id),
+    );
+
+    const currentBeforeChunkInsert = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+    if (!currentBeforeChunkInsert) {
+      return getOwnedDocument(ctx, id);
+    }
+    if (derivedFrom) {
+      await replaceDependencies(ctx, "document", id, "derived_from", []);
+      await applyDocumentDerivations(ctx, id, derivedFrom);
+    }
+    if (isTextLikeMimeType(doc.mimeType)) {
+      await insertChunks(ctx, id, content, doc.projectId, doc.shared);
+    }
+    const updated = (await db.select().from(documents).where(eq(documents.id, id)))[0];
+    if (!updated) throw new MemoryError(500, "updated document not found");
+    return updated;
+  }
+
+  const nextR2Key = nextCurrentDocumentR2Key(ctx, id, doc.mimeType);
+  await ctx.env.DOCUMENTS.put(nextR2Key, content, {
+    httpMetadata: { contentType: doc.mimeType },
+  });
+  try {
+    await replaceCurrentDocumentPointer(ctx, doc, {
+      r2Key: nextR2Key,
+      mimeType: doc.mimeType,
+      sizeBytes: new TextEncoder().encode(content).byteLength,
+    });
+  } catch (error) {
+    await ctx.env.DOCUMENTS.delete(nextR2Key);
+    throw error;
+  }
+  await ctx.env.DOCUMENTS.delete(doc.r2Key);
+
+  const currentAfterPointerSwap = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+  if (!currentAfterPointerSwap) {
+    return getOwnedDocument(ctx, id);
   }
   await markDownstreamStale(ctx, "document", id);
   const oldChunks = await db
     .select({ id: documentChunks.id })
     .from(documentChunks)
     .where(eq(documentChunks.documentId, id));
+
+  if (oldChunks.length > 0) {
+    const deletedCurrentChunks = await deleteDocumentChunksIfCurrent(ctx, doc, nextR2Key);
+    if (!deletedCurrentChunks) {
+      return getOwnedDocument(ctx, id);
+    }
+  }
   await cleanDocumentChunkGraphEdges(
     ctx,
     id,
@@ -2436,17 +2726,11 @@ export async function updateDocument(
     ctx,
     oldChunks.map((c) => c.id),
   );
-  await db.delete(documentChunks).where(eq(documentChunks.documentId, id));
-  await ctx.env.DOCUMENTS.put(doc.r2Key, content, { httpMetadata: { contentType: doc.mimeType } });
-  await db
-    .update(documents)
-    .set({
-      sizeBytes: new TextEncoder().encode(content).byteLength,
-      currentVersionNumber:
-        writeMode === "create_version" ? doc.currentVersionNumber + 1 : doc.currentVersionNumber,
-      updatedAt: now(),
-    })
-    .where(eq(documents.id, id));
+
+  const currentBeforeChunkInsert = await getOwnedDocumentIfCurrent(ctx, id, nextR2Key);
+  if (!currentBeforeChunkInsert) {
+    return getOwnedDocument(ctx, id);
+  }
   if (derivedFrom) {
     await replaceDependencies(ctx, "document", id, "derived_from", []);
     await applyDocumentDerivations(ctx, id, derivedFrom);

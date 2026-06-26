@@ -791,7 +791,7 @@ function renderEditForm(
       return (
         <form method="post" action={action}>
           <fieldset>
-            <legend>Save mode</legend>
+            <legend>Version update mode</legend>
             <label>
               <input
                 type="radio"
@@ -800,7 +800,7 @@ function renderEditForm(
                 checked
                 style={{ width: "auto" }}
               />{" "}
-              Overwrite current content without preserving history
+              Overwrite current version without preserving history
             </label>
             <label>
               <input
@@ -809,8 +809,11 @@ function renderEditForm(
                 value="create_version"
                 style={{ width: "auto" }}
               />{" "}
-              Preserve current content as a historical version before saving
+              Create new version and preserve the current version as history
             </label>
+            <p>
+              When you create a new version, brainfog assigns the next version number automatically.
+            </p>
           </fieldset>
           <label htmlFor="content">Content</label>
           <textarea name="content" id="content" required>

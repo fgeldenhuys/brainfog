@@ -83,7 +83,7 @@ async function body(c: ApiContext) {
 
 function handle(error: unknown) {
   if (error instanceof MemoryError)
-    return { body: { error: error.message }, status: error.status as 400 | 401 | 403 | 404 };
+    return { body: { error: error.message }, status: error.status as 400 | 401 | 403 | 404 | 409 };
   return { body: { error: "internal_error" }, status: 500 as const };
 }
 

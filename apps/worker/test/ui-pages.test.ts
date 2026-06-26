@@ -402,6 +402,9 @@ describe("authenticated UI pages", () => {
     expect(editHtml).toContain('name="write_mode"');
     expect(editHtml).toContain('value="overwrite_current"');
     expect(editHtml).toContain('value="create_version"');
+    expect(editHtml).toContain("Overwrite current version without preserving history");
+    expect(editHtml).toContain("Create new version and preserve the current version as history");
+    expect(editHtml).toContain("brainfog assigns the next version number automatically");
 
     const saved = await SELF.fetch(
       `https://example.com/app/browser/documents/${document.id}/edit`,
