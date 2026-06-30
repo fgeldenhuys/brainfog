@@ -119,6 +119,21 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         "Choose overwrite_current to replace the current version in place, or create_version to create a new current version. Brainfog assigns the next version number automatically.",
       )
       .optional();
+    const optionalUploadString = z.string().optional();
+    const emptyableDocumentWriteMode = z
+      .union([z.enum(["overwrite_current", "create_version"]), z.literal("")])
+      .describe(
+        "Choose overwrite_current to replace the current version in place, or create_version to create a new current version. Brainfog assigns the next version number automatically.",
+      )
+      .optional();
+    const emptyableIndexingMode = z
+      .union([z.enum(["auto", "skip"]), z.literal("")])
+      .describe(
+        "Indexing mode for document uploads. 'auto' (default) attempts text extraction for PDFs and indexes chunks. 'skip' stores the document without indexing.",
+      )
+      .optional();
+    const normalizeOptionalString = (value: unknown) =>
+      typeof value === "string" && value.length > 0 ? value : undefined;
 
     // Register prompts for agent guidance on memory usage
     this.server.prompt(
@@ -308,34 +323,40 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       "create_document_upload_link",
       "Create authenticated REST upload instructions for raw document bytes. File bytes are transferred over HTTP, never returned inline through MCP. Provide a document_id to update an existing document and choose whether to overwrite the current version or create a new one; brainfog assigns the next version number automatically. Omit document_id to create a new document (title is required for create, rejected for update).",
       {
-        title: z.string().optional(),
-        filename: z.string().optional(),
-        mime_type: z.string().optional(),
-        project_id: projectId,
+        title: optionalUploadString,
+        filename: optionalUploadString,
+        mime_type: optionalUploadString,
+        project_id: optionalUploadString.describe(
+          "Existing project ID for project-scoped records. Omit for global/personal records; do not pass an empty string.",
+        ),
         document_id: z
           .string()
           .describe(
             "Existing document ID to update. When provided, title must not be supplied and write_mode chooses whether to overwrite the current version or create a new version with an automatically assigned number.",
           )
           .optional(),
-        write_mode: documentWriteMode,
-        indexing_mode: z
-          .enum(["auto", "skip"])
-          .describe(
-            "Indexing mode for document uploads. 'auto' (default) attempts text extraction for PDFs and indexes chunks. 'skip' stores the document without indexing.",
-          )
-          .optional(),
+        write_mode: emptyableDocumentWriteMode,
+        indexing_mode: emptyableIndexingMode,
       },
       (args) => {
-        const hasDocId = Boolean(args.document_id);
-        const hasTitle = Boolean(args.title);
+        const normalized = {
+          title: normalizeOptionalString(args.title),
+          filename: normalizeOptionalString(args.filename),
+          mime_type: normalizeOptionalString(args.mime_type),
+          project_id: normalizeOptionalString(args.project_id),
+          document_id: normalizeOptionalString(args.document_id),
+          write_mode: normalizeOptionalString(args.write_mode),
+          indexing_mode: normalizeOptionalString(args.indexing_mode),
+        };
+        const hasDocId = Boolean(normalized.document_id);
+        const hasTitle = Boolean(normalized.title);
         if (hasDocId && hasTitle)
           throw new MemoryError(400, "title is not accepted when updating an existing document");
         if (!hasDocId && !hasTitle)
           throw new MemoryError(400, "missing title (required when creating a new document)");
         return createDocumentUploadLink(
           this.memoryCtx(),
-          args as Parameters<typeof createDocumentUploadLink>[1],
+          normalized as Parameters<typeof createDocumentUploadLink>[1],
         );
       },
     );

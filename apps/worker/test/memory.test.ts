@@ -3654,6 +3654,26 @@ describe("memory model REST service", () => {
     expect(JSON.stringify(download)).not.toContain(TOKEN_A);
   });
 
+  it("MCP upload-link treats empty optional fields as omitted", async () => {
+    const upload = await callMcpTool<{ url: string; method: string }>(
+      "create_document_upload_link",
+      {
+        title: "MCP Empty Optionals",
+        filename: "empty-optionals.pdf",
+        mime_type: "application/pdf",
+        project_id: "",
+        document_id: "",
+        write_mode: "",
+        indexing_mode: "",
+      },
+    );
+
+    expect(upload.method).toBe("POST");
+    expect(upload.url).toContain("/api/v1/documents/direct-upload");
+    expect(upload.url).toContain("title=MCP+Empty+Optionals");
+    expect(upload.url).not.toContain("project_id=");
+  });
+
   it("MCP document version tools list metadata and return text or download instructions", async () => {
     const doc = await json<{ id: string }>(
       await authFetch("/api/v1/documents", {
