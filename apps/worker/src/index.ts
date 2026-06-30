@@ -7,6 +7,7 @@ import { BrainfogMCP } from "./mcp";
 import type { AuthVariables } from "./middleware/auth";
 import { handleAuthorizeGet, handleAuthorizePost } from "./oauth";
 import { apiRoutes } from "./routes/api";
+import { documentTransferRoutes } from "./routes/document-transfer";
 import { uiApiRoutes } from "./routes/ui-api";
 import { uiRoutes } from "./ui";
 
@@ -16,6 +17,9 @@ export { GarminSpikeContainer } from "./garmin-spike-container";
 
 const app = new Hono<{ Bindings: Env; Variables: AuthVariables }>();
 
+// Document transfer capability routes — mounted before bearer-auth middleware
+// so they work with only the short-lived capability token (PBI-031).
+app.route("/api/v1", documentTransferRoutes);
 app.route("/api/v1", apiRoutes);
 app.route("/api/v1/ui", uiApiRoutes);
 

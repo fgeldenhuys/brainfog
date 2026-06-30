@@ -3,6 +3,7 @@ import {
   dependencyEdges,
   documentChunks,
   documents,
+  documentTransferCapabilities,
   documentVersions,
   facts,
   people,
@@ -46,6 +47,7 @@ const suffix = {
   ingestionRun: "u",
   ingestionIdempotencyKey: "i",
   ingestionConnectorCredential: "v",
+  documentTransferCapability: "b",
 } as const;
 
 export const graphKinds = [
@@ -71,6 +73,17 @@ const staleRelationships = ["derived_from", "summarizes", "supersedes", "observe
 export type GraphKind = (typeof graphKinds)[number];
 export type Relationship = (typeof relationships)[number];
 
+/**
+ * Whether trusted mode is enabled server-wide.
+ * In trusted mode, every authenticated user can read all owner-scoped memory
+ * objects regardless of their persisted `shared` flag. Writes/deletes remain
+ * strict owner-only. Persisted `shared` values are never modified by reads.
+ */
+export function isTrustedMode(ctx: Ctx): boolean {
+  const val = ctx.env.BRAINFOG_TRUSTED_MODE;
+  return val === "true" || val === "1" || val === "yes";
+}
+
 export class MemoryError extends Error {
   constructor(
     public status: number,
@@ -87,7 +100,9 @@ export function createId(kind: keyof typeof suffix) {
 }
 
 export const isBrainfogId = (value: string, typeSuffix?: string) =>
-  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteungiav]"}$`).test(value);
+  new RegExp(`^bf[0-9abcdefghjkmnpqrstvwxyz]{20}${typeSuffix ?? "[rpkfsdcteungiabv]"}$`).test(
+    value,
+  );
 
 function now() {
   return new Date();
@@ -113,6 +128,22 @@ async function ensureProject(ctx: Ctx, id?: string | null) {
       .where(
         and(eq(projects.id, id), or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true))),
       )
+      .limit(1)
+  )[0];
+  if (!row) throw new MemoryError(404, "project not found");
+}
+
+async function ensureReadableProject(ctx: Ctx, id?: string | null) {
+  if (!id) return;
+  const filters: (SQL | undefined)[] = [eq(projects.id, id)];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true)));
+  }
+  const row = (
+    await createDb(ctx.env.DB)
+      .select({ id: projects.id })
+      .from(projects)
+      .where(and(...filters))
       .limit(1)
   )[0];
   if (!row) throw new MemoryError(404, "project not found");
@@ -145,93 +176,118 @@ async function entityExists(
 ) {
   const db = createDb(ctx.env.DB);
 
+  // In trusted mode, dependency-position checks skip visibility filter (all authenticated users can read).
   // For "dependent" position (entity being created/updated), always strict owner check.
-  // For "dependency" position (entity being referenced), allow OR shared = true.
-  const ownerCheck =
-    position === "dependent"
-      ? eq(projects.ownerId, ctx.user.id)
-      : or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true));
+  const skipVisibility = position === "dependency" && isTrustedMode(ctx);
 
   const checks: Record<GraphKind, Promise<unknown[]>> = {
-    project: db
-      .select({ id: projects.id })
-      .from(projects)
-      .where(and(eq(projects.id, id), ownerCheck))
-      .limit(1),
+    project: (() => {
+      const f: (SQL | undefined)[] = [eq(projects.id, id)];
+      if (!skipVisibility) {
+        f.push(
+          position === "dependent"
+            ? eq(projects.ownerId, ctx.user.id)
+            : or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true)),
+        );
+      }
+      return db
+        .select({ id: projects.id })
+        .from(projects)
+        .where(and(...f))
+        .limit(1);
+    })(),
     person: db.select({ id: people.id }).from(people).where(eq(people.id, id)).limit(1),
-    task: db
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(
-        and(
-          eq(tasks.id, id),
+    task: (() => {
+      const f: (SQL | undefined)[] = [eq(tasks.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(tasks.ownerId, ctx.user.id)
             : or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true)),
-        ),
-      )
-      .limit(1),
-    fact: db
-      .select({ id: facts.id })
-      .from(facts)
-      .where(
-        and(
-          eq(facts.id, id),
+        );
+      }
+      return db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(and(...f))
+        .limit(1);
+    })(),
+    fact: (() => {
+      const f: (SQL | undefined)[] = [eq(facts.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(facts.ownerId, ctx.user.id)
             : or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
-        ),
-      )
-      .limit(1),
-    time_series_point: db
-      .select({ id: timeSeriesPoints.id })
-      .from(timeSeriesPoints)
-      .where(
-        and(
-          eq(timeSeriesPoints.id, id),
+        );
+      }
+      return db
+        .select({ id: facts.id })
+        .from(facts)
+        .where(and(...f))
+        .limit(1);
+    })(),
+    time_series_point: (() => {
+      const f: (SQL | undefined)[] = [eq(timeSeriesPoints.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(timeSeriesPoints.ownerId, ctx.user.id)
             : or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
-        ),
-      )
-      .limit(1),
-    document: db
-      .select({ id: documents.id })
-      .from(documents)
-      .where(
-        and(
-          eq(documents.id, id),
+        );
+      }
+      return db
+        .select({ id: timeSeriesPoints.id })
+        .from(timeSeriesPoints)
+        .where(and(...f))
+        .limit(1);
+    })(),
+    document: (() => {
+      const f: (SQL | undefined)[] = [eq(documents.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(documents.ownerId, ctx.user.id)
             : or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-        ),
-      )
-      .limit(1),
-    document_chunk: db
-      .select({ id: documentChunks.id })
-      .from(documentChunks)
-      .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-      .where(
-        and(
-          eq(documentChunks.id, id),
+        );
+      }
+      return db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(and(...f))
+        .limit(1);
+    })(),
+    document_chunk: (() => {
+      const f: (SQL | undefined)[] = [eq(documentChunks.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(documents.ownerId, ctx.user.id)
             : or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-        ),
-      )
-      .limit(1),
-    thought: db
-      .select({ id: thoughts.id })
-      .from(thoughts)
-      .where(
-        and(
-          eq(thoughts.id, id),
+        );
+      }
+      return db
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .innerJoin(documents, eq(documentChunks.documentId, documents.id))
+        .where(and(...f))
+        .limit(1);
+    })(),
+    thought: (() => {
+      const f: (SQL | undefined)[] = [eq(thoughts.id, id)];
+      if (!skipVisibility) {
+        f.push(
           position === "dependent"
             ? eq(thoughts.ownerId, ctx.user.id)
             : or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
-        ),
-      )
-      .limit(1),
+        );
+      }
+      return db
+        .select({ id: thoughts.id })
+        .from(thoughts)
+        .where(and(...f))
+        .limit(1);
+    })(),
   };
   return Boolean((await checks[kind])[0]);
 }
@@ -1074,7 +1130,7 @@ export async function markStale(
 
 export async function listStale(ctx: Ctx, input: { kind?: string; project_id?: string }) {
   if (input.kind) asGraphKind(input.kind);
-  if (input.project_id) await ensureProject(ctx, input.project_id);
+  if (input.project_id) await ensureReadableProject(ctx, input.project_id);
   // Query all stale edges across all owners (drop the ownerId = caller filter from base query)
   const filters = [isNotNull(dependencyEdges.staleAt)];
   if (input.kind) filters.push(eq(dependencyEdges.dependentKind, input.kind));
@@ -1120,84 +1176,83 @@ export async function listStale(ctx: Ctx, input: { kind?: string; project_id?: s
 
 async function projectIdForEntity(ctx: Ctx, kind: GraphKind, id: string) {
   const db = createDb(ctx.env.DB);
+  // In trusted mode, skip the owner/shared filter for read-only project ID resolution.
+  const skipFilter = isTrustedMode(ctx);
   if (kind === "project") return id;
   if (kind === "task") {
+    const filters: (SQL | undefined)[] = [eq(tasks.id, id)];
+    if (!skipFilter) filters.push(or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true)));
     const row = (
       await db
         .select({ projectId: tasks.projectId })
         .from(tasks)
-        .where(and(eq(tasks.id, id), or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true))))
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
   }
   if (kind === "fact") {
+    const filters: (SQL | undefined)[] = [eq(facts.id, id)];
+    if (!skipFilter) filters.push(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)));
     const row = (
       await db
         .select({ projectId: facts.projectId })
         .from(facts)
-        .where(and(eq(facts.id, id), or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true))))
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
   }
   if (kind === "document") {
+    const filters: (SQL | undefined)[] = [eq(documents.id, id)];
+    if (!skipFilter)
+      filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
     const row = (
       await db
         .select({ projectId: documents.projectId })
         .from(documents)
-        .where(
-          and(
-            eq(documents.id, id),
-            or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-          ),
-        )
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
   }
   if (kind === "document_chunk") {
+    const filters: (SQL | undefined)[] = [eq(documentChunks.id, id)];
+    if (!skipFilter)
+      filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
     const row = (
       await db
         .select({ projectId: documents.projectId })
         .from(documentChunks)
         .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-        .where(
-          and(
-            eq(documentChunks.id, id),
-            or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-          ),
-        )
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
   }
   if (kind === "thought") {
+    const filters: (SQL | undefined)[] = [eq(thoughts.id, id)];
+    if (!skipFilter) filters.push(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)));
     const row = (
       await db
         .select({ projectId: thoughts.projectId })
         .from(thoughts)
-        .where(
-          and(
-            eq(thoughts.id, id),
-            or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
-          ),
-        )
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
   }
   if (kind === "time_series_point") {
+    const filters: (SQL | undefined)[] = [eq(timeSeriesPoints.id, id)];
+    if (!skipFilter)
+      filters.push(
+        or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
+      );
     const row = (
       await db
         .select({ projectId: timeSeriesPoints.projectId })
         .from(timeSeriesPoints)
-        .where(
-          and(
-            eq(timeSeriesPoints.id, id),
-            or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
-          ),
-        )
+        .where(and(...filters))
         .limit(1)
     )[0];
     return row?.projectId ?? null;
@@ -1322,10 +1377,14 @@ export async function createProject(
 }
 
 export async function listProjects(ctx: Ctx) {
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true)));
+  }
   return createDb(ctx.env.DB)
     .select()
     .from(projects)
-    .where(or(eq(projects.ownerId, ctx.user.id), eq(projects.shared, true)))
+    .where(and(...filters))
     .orderBy(projects.name);
 }
 
@@ -1525,7 +1584,10 @@ export async function updateTask(ctx: Ctx, id: string, input: Record<string, unk
 }
 
 export async function listTasks(ctx: Ctx, q: { project_id?: string; status?: string }) {
-  const filters = [or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true))];
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(tasks.ownerId, ctx.user.id), eq(tasks.shared, true)));
+  }
   if (q.project_id) filters.push(eq(tasks.projectId, q.project_id));
   if (q.status) filters.push(eq(tasks.status, q.status));
   return createDb(ctx.env.DB)
@@ -2543,16 +2605,15 @@ export async function getDocumentBytes(ctx: Ctx, id: string) {
 }
 
 async function getReadableDocument(ctx: Ctx, id: string) {
+  const filters: (SQL | undefined)[] = [eq(documents.id, id)];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
+  }
   const doc = (
     await createDb(ctx.env.DB)
       .select()
       .from(documents)
-      .where(
-        and(
-          eq(documents.id, id),
-          or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-        ),
-      )
+      .where(and(...filters))
       .limit(1)
   )[0];
   if (!doc) throw new MemoryError(404, "document not found");
@@ -2576,13 +2637,51 @@ async function getOwnedDocumentIfCurrent(ctx: Ctx, id: string, r2Key: string) {
   return doc.r2Key === r2Key ? doc : null;
 }
 
-function transferPath(path: string, params: Record<string, string | undefined>) {
-  const query = new URLSearchParams();
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== "") query.set(key, value);
-  }
-  const suffix = query.toString();
-  return suffix ? `${path}?${suffix}` : path;
+// Capability minting helpers -----------------------------------------------
+
+const CAPABILITY_TTL_SECONDS = 900; // 15 minutes
+
+type CapabilityOperation = "create" | "update" | "download";
+
+async function mintCapability(
+  ctx: Ctx,
+  input: {
+    operation: CapabilityOperation;
+    project_id?: string | null;
+    document_id?: string | null;
+    title?: string | null;
+    filename?: string | null;
+    mime_type?: string | null;
+    write_mode?: string | null;
+    indexing_mode?: string | null;
+    max_size_bytes?: number | null;
+  },
+): Promise<{ capabilityToken: string; expiresAt: Date }> {
+  const capabilityToken = generateToken();
+  const secretHash = await hashToken(capabilityToken, ctx.env.BRAINFOG_TOKEN_HASH_SECRET);
+  const expiresAt = new Date(Date.now() + CAPABILITY_TTL_SECONDS * 1000);
+  const db = createDb(ctx.env.DB);
+  await db.insert(documentTransferCapabilities).values({
+    id: createId("documentTransferCapability"),
+    ownerId: ctx.user.id,
+    source: source(ctx),
+    operation: input.operation,
+    secretHash,
+    projectId: input.project_id ?? null,
+    documentId: input.document_id ?? null,
+    title: input.title ?? null,
+    filename: input.filename ?? null,
+    mimeType: input.mime_type ?? null,
+    writeMode: input.write_mode ?? null,
+    indexingMode: input.indexing_mode ?? null,
+    maxSizeBytes: input.max_size_bytes ?? null,
+    expiresAt,
+  });
+  return { capabilityToken, expiresAt };
+}
+
+function capabilityTransferUrl(secret: string) {
+  return `/api/v1/document-transfers/${secret}`;
 }
 
 export async function createDocumentUploadLink(
@@ -2611,53 +2710,50 @@ export async function createDocumentUploadLink(
     const responseMimeType = callerProvidedMimeType
       ? validateMimeType(input.mime_type)
       : doc.mimeType;
-    const path = transferPath(`/api/v1/documents/${doc.id}/direct-upload`, {
-      filename: input.filename,
-      mime_type: callerProvidedMimeType ? responseMimeType : undefined,
-      write_mode: writeMode === "overwrite_current" ? undefined : writeMode,
-      indexing_mode: indexingMode === "auto" ? undefined : indexingMode,
+    const { capabilityToken, expiresAt } = await mintCapability(ctx, {
+      operation: "update",
+      document_id: doc.id,
+      mime_type: responseMimeType,
+      filename: input.filename ?? null,
+      write_mode: writeMode,
+      indexing_mode: indexingMode,
+      max_size_bytes: directDocumentUploadMaxBytes,
     });
     return {
-      url: path,
+      url: capabilityTransferUrl(capabilityToken),
       method: "PATCH",
-      headers: {
-        Authorization: "Bearer <your existing brainfog bearer token>",
-        "Content-Type": responseMimeType,
-      },
-      expires_at: null,
+      headers: { "Content-Type": responseMimeType },
+      expires_at: Math.floor(expiresAt.getTime() / 1000),
       max_size_bytes: directDocumentUploadMaxBytes,
       notes:
-        "Upload raw file bytes to this authenticated REST endpoint to update an existing document. Choose overwrite_current to replace the current version in place, or create_version to create a new current version; brainfog assigns the next version number automatically. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
-      command_example:
-        'curl -X PATCH "$BRAINFOG_BASE_URL/api/v1/documents/<document-id>/direct-upload?mime_type=<mime-type>&filename=<filename>&write_mode=create_version" -H "Authorization: Bearer $BRAINFOG_TOKEN" -H "Content-Type: <mime-type>" --data-binary @<path-to-file>',
+        "Upload raw file bytes to this short-lived, single-use capability endpoint. Choose overwrite_current to replace the current version in place, or create_version to create a new current version; brainfog assigns the next version number automatically. Do not put file bytes in MCP tool arguments or outputs.",
+      command_example: `curl -X PATCH "$BRAINFOG_BASE_URL/api/v1/document-transfers/${capabilityToken}" -H "Content-Type: ${responseMimeType}" --data-binary @<path-to-file>`,
     };
   }
 
-  // Create mode: create a new document (existing behavior)
+  // Create mode: create a new document
   if (!input.title?.trim()) throw new MemoryError(400, "missing title");
   const projectId = optionalProjectId(input.project_id);
   await ensureProject(ctx, projectId);
   const mimeType = validateMimeType(input.mime_type);
-  const path = transferPath("/api/v1/documents/direct-upload", {
+  const { capabilityToken, expiresAt } = await mintCapability(ctx, {
+    operation: "create",
+    project_id: projectId,
     title: input.title,
-    filename: input.filename,
+    filename: input.filename ?? null,
     mime_type: mimeType,
-    project_id: projectId ?? undefined,
-    indexing_mode: indexingMode === "auto" ? undefined : indexingMode,
+    indexing_mode: indexingMode,
+    max_size_bytes: directDocumentUploadMaxBytes,
   });
   return {
-    url: path,
+    url: capabilityTransferUrl(capabilityToken),
     method: "POST",
-    headers: {
-      Authorization: "Bearer <your existing brainfog bearer token>",
-      "Content-Type": mimeType,
-    },
-    expires_at: null,
+    headers: { "Content-Type": mimeType },
+    expires_at: Math.floor(expiresAt.getTime() / 1000),
     max_size_bytes: directDocumentUploadMaxBytes,
     notes:
-      "Upload raw file bytes to this authenticated REST endpoint. Do not put file bytes in MCP tool arguments or outputs. No bearer token value is returned; use the caller's existing brainfog bearer token.",
-    command_example:
-      'curl -X POST "$BRAINFOG_BASE_URL/api/v1/documents/direct-upload?title=<title>&mime_type=<mime-type>&filename=<filename>" -H "Authorization: Bearer $BRAINFOG_TOKEN" -H "Content-Type: <mime-type>" --data-binary @<path-to-file>',
+      "Upload raw file bytes to this short-lived, single-use capability endpoint. Do not put file bytes in MCP tool arguments or outputs.",
+    command_example: `curl -X POST "$BRAINFOG_BASE_URL/api/v1/document-transfers/${capabilityToken}" -H "Content-Type: ${mimeType}" --data-binary @<path-to-file>`,
   };
 }
 
@@ -2673,23 +2769,73 @@ export async function createDocumentDownloadLink(
       .limit(1)
   )[0];
   if (!doc) throw new MemoryError(404, "document not found");
-  const path = transferPath(`/api/v1/documents/${doc.id}/download`, {
-    filename: input.filename,
+  const { capabilityToken, expiresAt } = await mintCapability(ctx, {
+    operation: "download",
+    document_id: doc.id,
+    filename: input.filename ?? null,
+    mime_type: doc.mimeType,
+    max_size_bytes: doc.sizeBytes,
   });
   return {
-    url: path,
+    url: capabilityTransferUrl(capabilityToken),
     method: "GET",
-    headers: { Authorization: "Bearer <your existing brainfog bearer token>" },
-    expires_at: null,
+    expires_at: Math.floor(expiresAt.getTime() / 1000),
     document_id: doc.id,
     mime_type: doc.mimeType,
     size_bytes: doc.sizeBytes,
     notes:
-      "Download raw document bytes from this authenticated REST endpoint. No file bytes or bearer token value are returned through MCP.",
-    command_example:
-      'curl -L "$BRAINFOG_BASE_URL/api/v1/documents/<document-id>/download?filename=<filename>" -H "Authorization: Bearer $BRAINFOG_TOKEN" -o <output-path>',
+      "Download raw document bytes from this short-lived, single-use capability endpoint. No file bytes or capability token are returned through MCP.",
+    command_example: `curl -L "$BRAINFOG_BASE_URL/api/v1/document-transfers/${capabilityToken}" -o <output-path>`,
   };
 }
+
+// Resolve a capability secret to a row, returning the capability if valid.
+export async function resolveCapability(
+  env: Env,
+  secret: string,
+): Promise<typeof documentTransferCapabilities.$inferSelect | null> {
+  const secretHash = await hashToken(secret, env.BRAINFOG_TOKEN_HASH_SECRET);
+  const db = createDb(env.DB);
+  const row = (
+    await db
+      .select()
+      .from(documentTransferCapabilities)
+      .where(eq(documentTransferCapabilities.secretHash, secretHash))
+      .limit(1)
+  )[0];
+  if (!row) return null;
+  if (row.consumedAt) return null;
+  if (row.expiresAt.getTime() <= Date.now()) return null;
+  return row;
+}
+
+/**
+ * Atomically claim (consume) a capability using a raw D1 prepared statement.
+ *
+ * Only succeeds if the capability row:
+ *   - matches the given id
+ *   - has consumed_at IS NULL
+ *   - has expires_at > the current unix timestamp
+ *
+ * Must be called AFTER cheap preflight checks (method, MIME, size) and
+ * BEFORE the document mutation. This ensures single-winner concurrency:
+ * only one request can claim a given capability; subsequent requests get
+ * zero changed rows and abort without mutating.
+ *
+ * Returns true if the claim succeeded; false if another consumer already
+ * claimed it, it expired, or the id does not exist.
+ */
+export async function consumeCapability(env: Env, id: string): Promise<boolean> {
+  const nowUnix = Math.floor(Date.now() / 1000);
+  const result = await env.DB.prepare(
+    "UPDATE document_transfer_capabilities SET consumed_at = ?, updated_at = ? WHERE id = ? AND consumed_at IS NULL AND expires_at > ?",
+  )
+    .bind(nowUnix, nowUnix, id, nowUnix)
+    .run();
+  return (result.meta?.changes ?? 0) > 0;
+}
+
+export const documentTransferCapabilityOperations = ["create", "update", "download"] as const;
 
 async function applyDocumentDerivations(
   ctx: Ctx,
@@ -3161,9 +3307,10 @@ export async function listTimeSeriesPoints(ctx: Ctx, q: Record<string, string | 
     }
   }
 
-  const filters = [
-    or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)),
-  ];
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(timeSeriesPoints.ownerId, ctx.user.id), eq(timeSeriesPoints.shared, true)));
+  }
   if (q.series_key) filters.push(eq(timeSeriesPoints.seriesKey, q.series_key));
   if (q.series_prefix) {
     // Use LIKE 'prefix.%' for prefix matching
@@ -3229,12 +3376,15 @@ export async function recall(
         returnMetadata: "all",
       })) as { matches?: { id: string; score?: number; metadata?: { kind?: string } }[] };
 
-      // Query B: shared-scoped (shared rows from all owners)
+      // Query B: shared-scoped (shared rows from all owners).
+      // In trusted mode, omit the shared:true filter so all visible vectors are included.
       const filterB: Record<string, unknown> = {
-        shared: true,
         kind: kinds.length === 1 ? kinds[0] : { $in: kinds },
         ...(q.project_id ? { project_id: q.project_id } : {}),
       };
+      if (!isTrustedMode(ctx)) {
+        filterB.shared = true;
+      }
       const resultB = (await ctx.env.VECTORIZE.query(embedding, {
         topK: limit,
         filter: filterB as VectorizeVectorMetadataFilter,
@@ -3278,50 +3428,44 @@ async function resolveRecallRows(
 ) {
   const db = createDb(ctx.env.DB);
   const out: unknown[] = [];
+  const trusted = isTrustedMode(ctx);
+
   for (const m of matches) {
     if (m.kind === "thought") {
+      const filters: (SQL | undefined)[] = [eq(thoughts.id, m.id)];
+      if (!trusted) filters.push(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)));
+      if (projectId) filters.push(eq(thoughts.projectId, projectId));
       const r = (
         await db
           .select()
           .from(thoughts)
-          .where(
-            and(
-              eq(thoughts.id, m.id),
-              or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
-              projectId ? eq(thoughts.projectId, projectId) : sql`1=1`,
-            ),
-          )
+          .where(and(...filters))
           .limit(1)
       )[0];
       if (r) out.push({ kind: "thought", score: m.score, row: r });
     } else if (m.kind === "fact") {
+      const filters: (SQL | undefined)[] = [eq(facts.id, m.id)];
+      if (!trusted) filters.push(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)));
+      if (projectId) filters.push(eq(facts.projectId, projectId));
       const r = (
         await db
           .select()
           .from(facts)
-          .where(
-            and(
-              eq(facts.id, m.id),
-              or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
-              projectId ? eq(facts.projectId, projectId) : sql`1=1`,
-            ),
-          )
+          .where(and(...filters))
           .limit(1)
       )[0];
       if (r) out.push({ kind: "fact", score: m.score, row: r });
     } else if (m.kind === "document_chunk") {
+      const filters: (SQL | undefined)[] = [eq(documentChunks.id, m.id)];
+      if (!trusted)
+        filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
+      if (projectId) filters.push(eq(documents.projectId, projectId));
       const r = (
         await db
           .select({ chunk: documentChunks, document: documents })
           .from(documentChunks)
           .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-          .where(
-            and(
-              eq(documentChunks.id, m.id),
-              or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-              projectId ? eq(documents.projectId, projectId) : sql`1=1`,
-            ),
-          )
+          .where(and(...filters))
           .limit(1)
       )[0];
       if (r)
@@ -3334,52 +3478,48 @@ async function resolveRecallRows(
   }
   if (out.length) return out;
   const like = `%${query.split(/\s+/)[0] ?? query}%`;
-  if (kinds.includes("thought"))
+  if (kinds.includes("thought")) {
+    const filters: (SQL | undefined)[] = [];
+    if (!trusted) filters.push(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)));
+    if (projectId) filters.push(eq(thoughts.projectId, projectId));
+    filters.push(sql`${thoughts.content} like ${like}`);
     out.push(
       ...(
         await db
           .select()
           .from(thoughts)
-          .where(
-            and(
-              or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)),
-              projectId ? eq(thoughts.projectId, projectId) : sql`1=1`,
-              sql`${thoughts.content} like ${like}`,
-            ),
-          )
+          .where(and(...filters))
           .limit(limit)
       ).map((row) => ({ kind: "thought", score: 0, row })),
     );
-  if (kinds.includes("fact"))
+  }
+  if (kinds.includes("fact")) {
+    const filters: (SQL | undefined)[] = [];
+    if (!trusted) filters.push(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)));
+    if (projectId) filters.push(eq(facts.projectId, projectId));
+    filters.push(sql`${facts.statement} like ${like}`);
     out.push(
       ...(
         await db
           .select()
           .from(facts)
-          .where(
-            and(
-              or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)),
-              projectId ? eq(facts.projectId, projectId) : sql`1=1`,
-              sql`${facts.statement} like ${like}`,
-            ),
-          )
+          .where(and(...filters))
           .limit(limit)
       ).map((row) => ({ kind: "fact", score: 0, row })),
     );
-  if (kinds.includes("document_chunk"))
+  }
+  if (kinds.includes("document_chunk")) {
+    const filters: (SQL | undefined)[] = [];
+    if (!trusted) filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
+    if (projectId) filters.push(eq(documents.projectId, projectId));
+    filters.push(sql`${documentChunks.content} like ${like}`);
     out.push(
       ...(
         await db
           .select({ chunk: documentChunks, document: documents })
           .from(documentChunks)
           .innerJoin(documents, eq(documentChunks.documentId, documents.id))
-          .where(
-            and(
-              or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)),
-              projectId ? eq(documents.projectId, projectId) : sql`1=1`,
-              sql`${documentChunks.content} like ${like}`,
-            ),
-          )
+          .where(and(...filters))
           .limit(limit)
       ).map((r) => ({
         kind: "document_chunk",
@@ -3387,29 +3527,42 @@ async function resolveRecallRows(
         row: { ...r.chunk, document: { id: r.document.id, title: r.document.title } },
       })),
     );
+  }
   return out;
 }
 
 export async function listFacts(ctx: Ctx) {
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)));
+  }
   const rows = await createDb(ctx.env.DB)
     .select()
     .from(facts)
-    .where(or(eq(facts.ownerId, ctx.user.id), eq(facts.shared, true)))
+    .where(and(...filters))
     .orderBy(desc(facts.createdAt));
   return Promise.all(rows.map((row) => factWithSupersession(ctx, row)));
 }
 export async function listThoughts(ctx: Ctx) {
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)));
+  }
   return createDb(ctx.env.DB)
     .select()
     .from(thoughts)
-    .where(or(eq(thoughts.ownerId, ctx.user.id), eq(thoughts.shared, true)))
+    .where(and(...filters))
     .orderBy(desc(thoughts.createdAt));
 }
 export async function listDocuments(ctx: Ctx) {
+  const filters: (SQL | undefined)[] = [];
+  if (!isTrustedMode(ctx)) {
+    filters.push(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)));
+  }
   return createDb(ctx.env.DB)
     .select()
     .from(documents)
-    .where(or(eq(documents.ownerId, ctx.user.id), eq(documents.shared, true)))
+    .where(and(...filters))
     .orderBy(desc(documents.createdAt));
 }
 
@@ -3489,14 +3642,7 @@ export async function deleteDocument(ctx: Ctx, id: string) {
 }
 
 export async function getChunksForDocument(ctx: Ctx, documentId: string) {
-  const doc = (
-    await createDb(ctx.env.DB)
-      .select({ id: documents.id })
-      .from(documents)
-      .where(and(eq(documents.id, documentId), eq(documents.ownerId, ctx.user.id)))
-      .limit(1)
-  )[0];
-  if (!doc) throw new MemoryError(404, "document not found");
+  await getReadableDocument(ctx, documentId);
   return createDb(ctx.env.DB)
     .select()
     .from(documentChunks)
@@ -3673,7 +3819,7 @@ export async function labelForEntity(ctx: Ctx, kind: GraphKind, id: string): Pro
 }
 
 /** Combines filters with AND, falling back to an always-true clause for the (unreachable) empty case. */
-function whereAll(filters: SQL<unknown>[]): SQL<unknown> {
+function whereAll(filters: (SQL | undefined)[]): SQL<unknown> {
   return and(...filters) ?? sql`1=1`;
 }
 
@@ -3714,7 +3860,7 @@ export async function browseEntities(
 
   switch (kind) {
     case "projects": {
-      const filters: SQL<unknown>[] = [eq(projects.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(projects.ownerId, ownerId)];
       if (q.q) filters.push(sql`${projects.name} like ${`%${q.q}%`}`);
       const where = whereAll(filters);
       const [rows, total] = await Promise.all([
@@ -3730,7 +3876,7 @@ export async function browseEntities(
       return { rows, total, page, per_page: perPage };
     }
     case "people": {
-      const filters: SQL<unknown>[] = [];
+      const filters: (SQL | undefined)[] = [];
       if (q.q) filters.push(sql`${people.name} like ${`%${q.q}%`}`);
       const where = whereAll(filters);
       const [rows, total] = await Promise.all([
@@ -3740,7 +3886,7 @@ export async function browseEntities(
       return { rows, total, page, per_page: perPage };
     }
     case "tasks": {
-      const filters: SQL<unknown>[] = [eq(tasks.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(tasks.ownerId, ownerId)];
       if (q.project_id) filters.push(eq(tasks.projectId, q.project_id));
       if (q.status) filters.push(eq(tasks.status, q.status));
       if (q.q) filters.push(sql`${tasks.title} like ${`%${q.q}%`}`);
@@ -3758,7 +3904,7 @@ export async function browseEntities(
       return { rows, total, page, per_page: perPage };
     }
     case "facts": {
-      const filters: SQL<unknown>[] = [eq(facts.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(facts.ownerId, ownerId)];
       if (q.project_id) filters.push(eq(facts.projectId, q.project_id));
       if (q.status) filters.push(eq(facts.status, q.status));
       if (q.q) filters.push(sql`${facts.statement} like ${`%${q.q}%`}`);
@@ -3777,7 +3923,7 @@ export async function browseEntities(
       return { rows: enriched, total, page, per_page: perPage };
     }
     case "thoughts": {
-      const filters: SQL<unknown>[] = [eq(thoughts.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(thoughts.ownerId, ownerId)];
       if (q.project_id) filters.push(eq(thoughts.projectId, q.project_id));
       if (q.q) filters.push(sql`${thoughts.content} like ${`%${q.q}%`}`);
       const where = whereAll(filters);
@@ -3794,7 +3940,7 @@ export async function browseEntities(
       return { rows, total, page, per_page: perPage };
     }
     case "documents": {
-      const filters: SQL<unknown>[] = [eq(documents.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(documents.ownerId, ownerId)];
       if (q.project_id) filters.push(eq(documents.projectId, q.project_id));
       if (q.q) filters.push(sql`${documents.title} like ${`%${q.q}%`}`);
       const where = whereAll(filters);
@@ -3825,7 +3971,7 @@ export async function browseEntities(
       };
     }
     case "time-series-points": {
-      const filters: SQL<unknown>[] = [eq(timeSeriesPoints.ownerId, ownerId)];
+      const filters: (SQL | undefined)[] = [eq(timeSeriesPoints.ownerId, ownerId)];
       if (q.project_id) filters.push(eq(timeSeriesPoints.projectId, q.project_id));
       if (q.q) filters.push(sql`${timeSeriesPoints.seriesKey} like ${`%${q.q}%`}`);
       if (q.from) filters.push(gte(timeSeriesPoints.observedAt, asDate(Number(q.from)) ?? now()));
@@ -4162,7 +4308,7 @@ export async function getMetrics(ctx: Ctx, q: MetricsQuery) {
     );
   const chunkCount = Number(chunkCountRows[0]?.count ?? 0);
 
-  const tspFilters: SQL<unknown>[] = [eq(timeSeriesPoints.ownerId, ownerId)];
+  const tspFilters: (SQL | undefined)[] = [eq(timeSeriesPoints.ownerId, ownerId)];
   if (projectId) tspFilters.push(eq(timeSeriesPoints.projectId, projectId));
   if (fromDate) tspFilters.push(gte(timeSeriesPoints.observedAt, fromDate));
   if (toDate) tspFilters.push(lte(timeSeriesPoints.observedAt, toDate));

@@ -15,3 +15,9 @@ D1_REST_API_TOKEN=
 # OAuth 2.1 grant and token storage uses the OAUTH_KV KV namespace binding
 # configured in wrangler.jsonc (ADR-012). No .dev.vars entry is needed;
 # the binding is automatically available in both local and production environments.
+
+# Trusted mode: set BRAINFOG_TRUSTED_MODE=true as a non-secret wrangler var
+# (in wrangler.jsonc [env.dev].vars or [env.production].vars) to bypass
+# owner/shared visibility filters on read paths, making all persisted memory
+# visible to any authenticated user. Writes, deletes, and credentials stay
+# owner-only. Default off (false / unset). (PBI-032)

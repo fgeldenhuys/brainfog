@@ -286,35 +286,42 @@ describe("connector credentials", () => {
       }),
     });
 
-    // User B tries to save credentials — should get 404 (connector not found for B)
-    const putB = await authFetch(
-      `/api/v1/ingestion/connectors/${connector.id}/credentials`,
-      {
-        method: "PUT",
-        body: JSON.stringify({
-          auth_type: "password",
-          payload: { username: "intruder", password: "evil" },
-        }),
-      },
-      TOKEN_B,
-    );
-    expect(putB.status).toBe(404);
+    const trustedEnv = env as typeof env & { BRAINFOG_TRUSTED_MODE?: string };
+    const previousTrustedMode = trustedEnv.BRAINFOG_TRUSTED_MODE;
+    trustedEnv.BRAINFOG_TRUSTED_MODE = "true";
+    try {
+      // User B tries to save credentials — should get 404 even in trusted mode.
+      const putB = await authFetch(
+        `/api/v1/ingestion/connectors/${connector.id}/credentials`,
+        {
+          method: "PUT",
+          body: JSON.stringify({
+            auth_type: "password",
+            payload: { username: "intruder", password: "evil" },
+          }),
+        },
+        TOKEN_B,
+      );
+      expect(putB.status).toBe(404);
 
-    // User B tries to GET credentials — should get 404
-    const getB = await authFetch(
-      `/api/v1/ingestion/connectors/${connector.id}/credentials`,
-      {},
-      TOKEN_B,
-    );
-    expect(getB.status).toBe(404);
+      // User B tries to GET credentials — should get 404 even in trusted mode.
+      const getB = await authFetch(
+        `/api/v1/ingestion/connectors/${connector.id}/credentials`,
+        {},
+        TOKEN_B,
+      );
+      expect(getB.status).toBe(404);
 
-    // User B tries to DELETE credentials — should get 404
-    const delB = await authFetch(
-      `/api/v1/ingestion/connectors/${connector.id}/credentials`,
-      { method: "DELETE" },
-      TOKEN_B,
-    );
-    expect(delB.status).toBe(404);
+      // User B tries to DELETE credentials — should get 404 even in trusted mode.
+      const delB = await authFetch(
+        `/api/v1/ingestion/connectors/${connector.id}/credentials`,
+        { method: "DELETE" },
+        TOKEN_B,
+      );
+      expect(delB.status).toBe(404);
+    } finally {
+      trustedEnv.BRAINFOG_TRUSTED_MODE = previousTrustedMode;
+    }
   });
 
   it("6. missing or malformed BRAINFOG_CONNECTOR_ENCRYPTION_KEY fails closed", async () => {

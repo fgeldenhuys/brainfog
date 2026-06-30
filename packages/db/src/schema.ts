@@ -518,3 +518,31 @@ export const dependencyEdges = sqliteTable(
     index("dependency_edges_stale_idx").on(table.ownerId, table.staleAt),
   ],
 );
+
+export const documentTransferCapabilities = sqliteTable(
+  "document_transfer_capabilities",
+  {
+    id: text("id").primaryKey(),
+    ownerId: text("owner_id")
+      .notNull()
+      .references(() => users.id),
+    source: text("source").notNull(),
+    operation: text("operation").notNull(),
+    secretHash: text("secret_hash").notNull().unique(),
+    projectId: text("project_id"),
+    documentId: text("document_id"),
+    title: text("title"),
+    filename: text("filename"),
+    mimeType: text("mime_type"),
+    writeMode: text("write_mode"),
+    indexingMode: text("indexing_mode"),
+    maxSizeBytes: integer("max_size_bytes"),
+    expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+    consumedAt: integer("consumed_at", { mode: "timestamp" }),
+    ...timestamps,
+  },
+  (table) => [
+    index("document_transfer_capabilities_expires_at_idx").on(table.expiresAt),
+    index("document_transfer_capabilities_owner_idx").on(table.ownerId),
+  ],
+);

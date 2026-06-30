@@ -4,6 +4,7 @@ import {
   dependencyEdges,
   documentChunks,
   documents,
+  documentTransferCapabilities,
   documentVersions,
   facts,
   people,
@@ -14,11 +15,13 @@ import {
   tokens,
   users,
 } from "@brainfog/db";
-import { hashToken } from "@brainfog/shared";
+import { generateToken, hashToken } from "@brainfog/shared";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import {
   addDocument,
+  createDependency,
+  createDocumentDownloadLink,
   createDocumentFromBytes,
   createDocumentUploadLink,
   createProject,
@@ -27,6 +30,14 @@ import {
   deleteFact,
   deleteThought,
   getDocumentVersionBytes,
+  listDependencies,
+  listDocuments,
+  listFacts,
+  listProjects,
+  listStale,
+  listTasks,
+  listThoughts,
+  listTimeSeriesPoints,
   recall,
   recordFact,
   recordTimeSeriesPoint,
@@ -1629,9 +1640,10 @@ describe("memory model REST service", () => {
       write_mode: "create_version",
     });
     expect(result.method).toBe("PATCH");
-    expect(result.url).toContain(`/api/v1/documents/${doc.id}/direct-upload`);
-    expect(result.url).toContain("write_mode=create_version");
-    expect(result.headers.Authorization).toBe("Bearer <your existing brainfog bearer token>");
+    expect(result.url).toContain("/api/v1/document-transfers/");
+    expect(result.expires_at).toBeGreaterThan(0);
+    // No Authorization header on capability response
+    expect("Authorization" in result.headers).toBe(false);
   });
 
   it("create_document_upload_link MCP tool without document_id returns POST instructions", async () => {
@@ -1641,8 +1653,8 @@ describe("memory model REST service", () => {
       mime_type: "text/plain",
     });
     expect(result.method).toBe("POST");
-    expect(result.url).toContain("/api/v1/documents/direct-upload");
-    expect(result.url).toContain("title=New+doc+via+link");
+    expect(result.url).toContain("/api/v1/document-transfers/");
+    expect(result.expires_at).toBeGreaterThan(0);
   });
 
   it("create_document_upload_link with document_id rejects title with 400", async () => {
@@ -1860,7 +1872,7 @@ describe("memory model REST service", () => {
       mime_type: "text/plain",
     });
     expect(createResult.method).toBe("POST");
-    expect(createResult.url).toContain("/api/v1/documents/direct-upload");
+    expect(createResult.url).toContain("/api/v1/document-transfers/");
 
     // Update mode
     const doc = await addDocument(ctx, { title: "MCP create vs update", content: "existing" });
@@ -1870,7 +1882,7 @@ describe("memory model REST service", () => {
       write_mode: "create_version",
     });
     expect(updateResult.method).toBe("PATCH");
-    expect(updateResult.url).toContain(`/api/v1/documents/${doc.id}/direct-upload`);
+    expect(updateResult.url).toContain("/api/v1/document-transfers/");
   });
 
   it("update via createDocumentUploadLink without mime_type preserves original MIME type", async () => {
@@ -2417,30 +2429,60 @@ describe("memory model REST service", () => {
     expect(rows[0]?.projectId).toBeNull();
   });
 
-  it("MCP remember rejects empty project_id before persistence", async () => {
-    const session = await mcpSession();
-    const result = await mcpRequest(
-      {
-        jsonrpc: "2.0",
-        id: 2,
-        method: "tools/call",
-        params: {
-          name: "remember",
-          arguments: { content: "MCP empty project id should not persist", project_id: "" },
-        },
-      },
-      session,
-    );
+  it("MCP tools treat empty optional project_id as omitted", async () => {
+    const thought = await callMcpTool<{ id: string; projectId: string | null }>("remember", {
+      content: "MCP empty project id should persist globally",
+      project_id: "",
+    });
+    expect(thought.projectId).toBeNull();
 
-    expect(result.response.status).toBe(200);
-    const text = (result.message as { result?: { content?: { text?: string }[] } }).result
-      ?.content?.[0]?.text;
-    expect(text).toContain("MCP error");
-    const rows = await createDb(env.DB)
-      .select()
-      .from(thoughts)
-      .where(eq(thoughts.content, "MCP empty project id should not persist"));
-    expect(rows).toHaveLength(0);
+    const recalled = await callMcpTool<{ kind: string; row: { id: string } }[]>("recall", {
+      query: "MCP empty project id should persist globally",
+      project_id: "",
+      kinds: ["thought"],
+    });
+    expect(recalled.some((r) => r.row.id === thought.id)).toBe(true);
+
+    const globalTask = await callMcpTool<{ id: string; projectId: string | null }>("create_task", {
+      title: "MCP empty project task",
+      project_id: "",
+    });
+    expect(globalTask.projectId).toBeNull();
+    const listedTasks = await callMcpTool<{ id: string }[]>("list_tasks", { project_id: "" });
+    expect(listedTasks.some((task) => task.id === globalTask.id)).toBe(true);
+
+    const project = await createProject(
+      { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" },
+      { name: "MCP Empty Project Update" },
+    );
+    const scopedTask = await callMcpTool<{ id: string; projectId: string }>("create_task", {
+      title: "MCP scoped task before empty update",
+      project_id: project.id,
+    });
+    const updatedTask = await callMcpTool<{ id: string; projectId: string }>("update_task", {
+      id: scopedTask.id,
+      title: "MCP scoped task after empty update",
+      project_id: "",
+    });
+    expect(updatedTask.projectId).toBe(project.id);
+
+    const point = await callMcpTool<{ id: string; projectId: string | null }>(
+      "record_time_series_point",
+      {
+        series_key: "mcp.empty_project.single",
+        value: 1,
+        project_id: "",
+      },
+    );
+    expect(point.projectId).toBeNull();
+
+    const points = await callMcpTool<{ id: string; projectId: string | null }[]>(
+      "record_time_series_points",
+      {
+        points: [{ series_key: "mcp.empty_project.bulk", value: 2, project_id: "" }],
+      },
+    );
+    expect(points[0]?.projectId).toBeNull();
   });
 
   it("MCP link tool can link a thought to a time-series point", async () => {
@@ -3243,6 +3285,195 @@ describe("memory model REST service", () => {
     expect(resultIds).not.toContain(otherUserThought.id);
   });
 
+  it("trusted mode widens read visibility without changing shared flags or write ownership", async () => {
+    const ownerCtx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test" };
+    const trustedEnv = { ...env, BRAINFOG_TRUSTED_MODE: "true" } as unknown as typeof env;
+    const trustedOtherCtx = {
+      env: trustedEnv,
+      user: { id: "user-memory-b", name: "Memory B" },
+      source: "test",
+    };
+    const normalOtherCtx = {
+      env,
+      user: { id: "user-memory-b", name: "Memory B" },
+      source: "test",
+    };
+
+    const project = await createProject(ownerCtx, {
+      name: `Trusted private project ${crypto.randomUUID()}`,
+    });
+    const task = await createTask(ownerCtx, {
+      title: `Trusted private task ${crypto.randomUUID()}`,
+      project_id: project.id,
+    });
+    const fact = await recordFact(ownerCtx, {
+      statement: `Trusted private fact ${crypto.randomUUID()}`,
+      project_id: project.id,
+    });
+    const thought = await remember(ownerCtx, {
+      content: `Trusted private thought ${crypto.randomUUID()}`,
+      project_id: project.id,
+    });
+    const doc = await addDocument(ownerCtx, {
+      title: `Trusted private doc ${crypto.randomUUID()}`,
+      content: "trusted private document chunk",
+      project_id: project.id,
+    });
+    const point = await recordTimeSeriesPoint(ownerCtx, {
+      series_key: `trusted.private.${crypto.randomUUID()}`,
+      value: 1,
+      project_id: project.id,
+    });
+
+    expect((await listProjects(normalOtherCtx)).map((row) => row.id)).not.toContain(project.id);
+    expect((await listTasks(normalOtherCtx, {})).map((row) => row.id)).not.toContain(task.id);
+    expect((await listFacts(normalOtherCtx)).map((row) => row.id)).not.toContain(fact.id);
+    expect((await listThoughts(normalOtherCtx)).map((row) => row.id)).not.toContain(thought.id);
+    expect((await listDocuments(normalOtherCtx)).map((row) => row.id)).not.toContain(doc.id);
+    expect((await listTimeSeriesPoints(normalOtherCtx, {})).map((row) => row.id)).not.toContain(
+      point.id,
+    );
+
+    expect((await listProjects(trustedOtherCtx)).map((row) => row.id)).toContain(project.id);
+    expect((await listTasks(trustedOtherCtx, {})).map((row) => row.id)).toContain(task.id);
+    expect((await listFacts(trustedOtherCtx)).map((row) => row.id)).toContain(fact.id);
+    expect((await listThoughts(trustedOtherCtx)).map((row) => row.id)).toContain(thought.id);
+    expect((await listDocuments(trustedOtherCtx)).map((row) => row.id)).toContain(doc.id);
+    expect((await listTimeSeriesPoints(trustedOtherCtx, {})).map((row) => row.id)).toContain(
+      point.id,
+    );
+
+    await expect(
+      updateTask(trustedOtherCtx, task.id, { title: "not allowed" }),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      setShared(trustedOtherCtx, { entity_kind: "task", entity_id: task.id, shared: true }),
+    ).rejects.toMatchObject({ status: 404 });
+    await expect(
+      createTask(trustedOtherCtx, {
+        title: "private project reference still rejected",
+        project_id: project.id,
+      }),
+    ).rejects.toMatchObject({ status: 404 });
+
+    const db = createDb(env.DB);
+    expect((await db.select().from(projects).where(eq(projects.id, project.id)))[0]?.shared).toBe(
+      false,
+    );
+    expect((await db.select().from(tasks).where(eq(tasks.id, task.id)))[0]?.shared).toBe(false);
+    expect((await db.select().from(facts).where(eq(facts.id, fact.id)))[0]?.shared).toBe(false);
+    expect((await db.select().from(thoughts).where(eq(thoughts.id, thought.id)))[0]?.shared).toBe(
+      false,
+    );
+    expect((await db.select().from(documents).where(eq(documents.id, doc.id)))[0]?.shared).toBe(
+      false,
+    );
+    expect(
+      (await db.select().from(timeSeriesPoints).where(eq(timeSeriesPoints.id, point.id)))[0]
+        ?.shared,
+    ).toBe(false);
+  });
+
+  it("trusted mode recall queries owner results first and then all visible vectors", async () => {
+    const ownCtx = { env, user: { id: "user-memory-b", name: "Memory B" }, source: "test" };
+    const otherCtx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test" };
+    const ownThought = await remember(ownCtx, { content: "trusted recall equal score own" });
+    const otherThought = await remember(otherCtx, { content: "trusted recall equal score other" });
+    const query = vi.fn(async (_values, options?: { filter?: Record<string, unknown> }) => {
+      if (options?.filter?.owner_id === "user-memory-b") {
+        return { matches: [{ id: ownThought.id, score: 0.8, metadata: { kind: "thought" } }] };
+      }
+      return {
+        matches: [
+          { id: ownThought.id, score: 0.8, metadata: { kind: "thought" } },
+          { id: otherThought.id, score: 0.8, metadata: { kind: "thought" } },
+        ],
+      };
+    });
+    const vectorEnv = {
+      DB: env.DB,
+      DOCUMENTS: env.DOCUMENTS,
+      VECTORIZE: { upsert: vi.fn(), deleteByIds: vi.fn(), query },
+      AI: { run: vi.fn(async () => ({ data: [Array.from({ length: 1024 }, () => 0.25)] })) },
+      BRAINFOG_TRUSTED_MODE: "true",
+    } as unknown as typeof env;
+
+    const results = await recall(
+      { env: vectorEnv, user: { id: "user-memory-b", name: "Memory B" }, source: "test" },
+      { query: "trusted recall", kinds: ["thought"], limit: 10 },
+    );
+
+    expect(query).toHaveBeenNthCalledWith(
+      1,
+      expect.any(Array),
+      expect.objectContaining({ filter: expect.objectContaining({ owner_id: "user-memory-b" }) }),
+    );
+    expect(query).toHaveBeenNthCalledWith(
+      2,
+      expect.any(Array),
+      expect.objectContaining({ filter: expect.not.objectContaining({ shared: true }) }),
+    );
+    expect(results.map((row) => (row as { row: { id: string } }).row.id)).toEqual([
+      ownThought.id,
+      otherThought.id,
+    ]);
+  });
+
+  it("trusted mode keeps private cross-owner dependency writes blocked but exposes readable stale edges", async () => {
+    const trustedEnv = { ...env, BRAINFOG_TRUSTED_MODE: "true" } as unknown as typeof env;
+    const ownerCtx = {
+      env: trustedEnv,
+      user: { id: "user-memory-a", name: "Memory A" },
+      source: "test",
+    };
+    const otherCtx = {
+      env: trustedEnv,
+      user: { id: "user-memory-b", name: "Memory B" },
+      source: "test",
+    };
+    const fact = await recordFact(ownerCtx, {
+      statement: `trusted dependency source ${crypto.randomUUID()}`,
+    });
+    const ownerThought = await remember(ownerCtx, {
+      content: `trusted dependency owner dependent ${crypto.randomUUID()}`,
+    });
+    const otherThought = await remember(otherCtx, {
+      content: `trusted dependency dependent ${crypto.randomUUID()}`,
+    });
+
+    await expect(
+      createDependency(otherCtx, {
+        dependent: { kind: "thought", id: otherThought.id },
+        dependency: { kind: "fact", id: fact.id },
+        relationship: "derived_from",
+      }),
+    ).rejects.toMatchObject({ status: 404 });
+
+    const edge = await createDependency(ownerCtx, {
+      dependent: { kind: "thought", id: ownerThought.id },
+      dependency: { kind: "fact", id: fact.id },
+      relationship: "derived_from",
+    });
+    expect(edge.cascaded).toBeUndefined();
+
+    const db = createDb(env.DB);
+    expect((await db.select().from(facts).where(eq(facts.id, fact.id)))[0]?.shared).toBe(false);
+    expect(
+      (await db.select().from(thoughts).where(eq(thoughts.id, ownerThought.id)))[0]?.shared,
+    ).toBe(false);
+
+    const downstream = await listDependencies(otherCtx, {
+      entity_kind: "fact",
+      entity_id: fact.id,
+      direction: "downstream",
+    });
+    expect(downstream.map((row) => row.id)).toContain(edge.id);
+
+    await updateFact(ownerCtx, fact.id, { statement: `${fact.statement} updated` });
+    const stale = await listStale(otherCtx, { kind: "thought" });
+    expect(stale.map((row) => row.id)).toContain(edge.id);
+  });
+
   it("recall applies kind filtering in the Vectorize query before topK", async () => {
     const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test" };
     const thought = await remember(ctx, { content: "requested kind target" });
@@ -3610,24 +3841,62 @@ describe("memory model REST service", () => {
     );
   });
 
+  it("MCP tools/list does not mark optional project_id fields as required", async () => {
+    const session = await mcpSession();
+    const response = await mcpRequest(
+      { jsonrpc: "2.0", id: 111, method: "tools/list", params: {} },
+      session,
+    );
+    expect(response.response.status).toBe(200);
+    const tools = (
+      response.message as {
+        result?: {
+          tools?: Array<{ name: string; inputSchema?: { required?: string[] } }>;
+        };
+      }
+    ).result?.tools;
+    expect(tools).toBeTruthy();
+
+    const toolsWithOptionalProjectId = [
+      "remember",
+      "record_fact",
+      "add_document",
+      "recall",
+      "create_task",
+      "update_task",
+      "list_tasks",
+      "record_time_series_point",
+      "list_time_series_points",
+      "create_ingestion_connector",
+      "update_ingestion_connector",
+      "list_stale",
+    ];
+    for (const name of toolsWithOptionalProjectId) {
+      const tool = tools?.find((candidate) => candidate.name === name);
+      expect(tool, `${name} should be listed`).toBeTruthy();
+      expect(tool?.inputSchema?.required ?? []).not.toContain("project_id");
+    }
+  });
+
   it("MCP document transfer tools return authenticated REST instructions without bytes or tokens", async () => {
     const upload = await callMcpTool<{
       url: string;
       method: string;
       headers: Record<string, string>;
       command_example: string;
+      expires_at: number;
     }>("create_document_upload_link", {
       title: "MCP Upload",
       filename: "backup.zip",
       mime_type: "application/zip",
     });
     expect(upload.method).toBe("POST");
-    expect(upload.url).toContain("/api/v1/documents/direct-upload");
-    expect(upload.headers.Authorization).toContain("<your existing brainfog bearer token>");
+    expect(upload.url).toContain("/api/v1/document-transfers/");
+    expect(upload.headers.Authorization).toBeUndefined();
+    expect(upload.headers["Content-Type"]).toBe("application/zip");
+    expect(upload.expires_at).toBeGreaterThan(0);
     expect(upload.command_example).toContain("--data-binary @<path-to-file>");
-    // Static template never interpolates caller-supplied values
-    expect(upload.command_example).not.toContain("backup.zip");
-    expect(upload.command_example).not.toContain("application/zip");
+    // Capability token is short-lived and safe to expose; bearer token must never leak
     expect(JSON.stringify(upload)).not.toContain(TOKEN_A);
     expect(JSON.stringify(upload)).not.toContain("UEsDB");
 
@@ -3644,13 +3913,15 @@ describe("memory model REST service", () => {
     const download = await callMcpTool<{
       url: string;
       method: string;
-      headers: Record<string, string>;
       document_id: string;
+      expires_at: number;
     }>("create_document_download_link", { document_id: doc.id, filename: "restore.bin" });
     expect(download.method).toBe("GET");
-    expect(download.url).toContain(`/api/v1/documents/${doc.id}/download`);
+    expect(download.url).toContain("/api/v1/document-transfers/");
     expect(download.document_id).toBe(doc.id);
-    expect(download.headers.Authorization).toContain("<your existing brainfog bearer token>");
+    expect(download.expires_at).toBeGreaterThan(0);
+    // No Authorization header on download link response
+    expect((download as Record<string, unknown>).headers).toBeUndefined();
     expect(JSON.stringify(download)).not.toContain(TOKEN_A);
   });
 
@@ -3669,9 +3940,9 @@ describe("memory model REST service", () => {
     );
 
     expect(upload.method).toBe("POST");
-    expect(upload.url).toContain("/api/v1/documents/direct-upload");
-    expect(upload.url).toContain("title=MCP+Empty+Optionals");
-    expect(upload.url).not.toContain("project_id=");
+    expect(upload.url).toContain("/api/v1/document-transfers/");
+    // Capability URL is a clean path with no query params — no metadata in URL
+    expect(upload.url).not.toContain("?");
   });
 
   it("MCP document version tools list metadata and return text or download instructions", async () => {
@@ -3724,18 +3995,16 @@ describe("memory model REST service", () => {
     expect(JSON.stringify(binaryPrevious)).not.toContain("AQMF");
   });
 
-  it("MCP upload-link command_example is a static template and does not interpolate hostile values", async () => {
+  it("MCP upload-link command_example is a safe static template", async () => {
     // Hostile filename with shell metacharacters — valid MIME type
     const upload = await callMcpTool<{ command_example: string }>("create_document_upload_link", {
       title: "Normal",
       filename: '"; rm -rf /; echo "',
       mime_type: "text/plain",
     });
-    // command_example is a static template — no caller-controlled values appear
+    // command_example does not interpolate caller-controlled values
     expect(upload.command_example).not.toContain("rm -rf");
     expect(upload.command_example).toContain("<path-to-file>");
-    expect(upload.command_example).toContain("<mime-type>");
-    expect(upload.command_example).toContain("<title>");
 
     // Shell backticks in filename
     const upload2 = await callMcpTool<{ command_example: string }>("create_document_upload_link", {
@@ -3753,9 +4022,9 @@ describe("memory model REST service", () => {
       mime_type: "text/plain",
     });
     expect(upload3.command_example).not.toContain("$(id)");
-    expect(upload3.command_example).toContain("<title>");
+    expect(upload3.command_example).toContain("<path-to-file>");
 
-    // No token leakage
+    // No bearer token leakage
     expect(JSON.stringify(upload)).not.toContain(TOKEN_A);
     expect(JSON.stringify(upload2)).not.toContain(TOKEN_A);
     expect(JSON.stringify(upload3)).not.toContain(TOKEN_A);
@@ -3775,9 +4044,8 @@ describe("memory model REST service", () => {
     );
     expect(download.command_example).not.toContain("rm -rf");
     expect(download.command_example).toContain("<output-path>");
-    expect(download.command_example).toContain("<document-id>");
 
-    // No token leakage
+    // No bearer token leakage
     expect(JSON.stringify(download)).not.toContain(TOKEN_A);
 
     // Cleanup
@@ -5178,6 +5446,413 @@ describe("Shared visibility", async () => {
       const raw = await callMcpToolRaw("delete_project", { id: project.id }, TOKEN_B);
       expect(raw.result?.isError).toBe(true);
       expect(raw.result?.content?.[0]?.text).toContain("not found");
+    });
+  });
+
+  describe("Capability-authenticated document transfer routes (PBI-031)", () => {
+    /** Extract the capability token from a capability URL. */
+    function tokenFromUrl(url: string): string {
+      const parts = url.split("/document-transfers/");
+      if (parts.length < 2) throw new Error(`URL ${url} does not contain /document-transfers/`);
+      return parts[1]?.split("?")[0]?.split("#")[0] ?? "";
+    }
+
+    it("capability create upload without bearer token creates document and returns 201", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "Cap Create",
+        filename: "cap-create.bin",
+        mime_type: "application/octet-stream",
+      });
+      expect(link.method).toBe("POST");
+      expect(link.url).toContain("/api/v1/document-transfers/");
+
+      const secret = tokenFromUrl(link.url);
+      const bytes = new Uint8Array([0xca, 0xfe, 0xba, 0xbe]);
+      const response = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: bytes,
+      });
+      expect(response.status).toBe(201);
+      const doc = await response.json<{ id: string; title: string; sizeBytes: number }>();
+      expect(doc.title).toBe("Cap Create");
+      expect(doc.sizeBytes).toBe(4);
+
+      // Verify the document is owned by the right user and can be downloaded via bearer auth
+      const download = await authFetch(`/api/v1/documents/${doc.id}/download`);
+      expect(download.status).toBe(200);
+      expect(new Uint8Array(await download.arrayBuffer())).toEqual(bytes);
+    });
+
+    it("capability update upload without bearer token with write_mode=create_version", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const doc = await addDocument(ctx, { title: "Cap Update", content: "original" });
+
+      const link = await createDocumentUploadLink(ctx, {
+        document_id: doc.id,
+        mime_type: "application/octet-stream",
+        write_mode: "create_version",
+      });
+      expect(link.method).toBe("PATCH");
+
+      const secret = tokenFromUrl(link.url);
+      const newBytes = new Uint8Array([0x11, 0x22, 0x33]);
+      const response = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: newBytes,
+      });
+      expect(response.status).toBe(200);
+      const updated = await response.json<{ id: string; currentVersionNumber: number }>();
+      expect(updated.currentVersionNumber).toBe(2);
+
+      // Verify version history
+      const versions = await json<Array<{ version_number: number }>>(
+        await authFetch(`/api/v1/documents/${doc.id}/versions`),
+      );
+      expect(versions.map((v) => v.version_number)).toEqual([2, 1]);
+
+      // Historical bytes accessible via bearer-auth download
+      const historical = await authFetch(`/api/v1/documents/${doc.id}/versions/1/download`);
+      expect(historical.status).toBe(200);
+      expect(new TextDecoder().decode(await historical.arrayBuffer())).toContain("original");
+    });
+
+    it("capability download without bearer token returns exact bytes with safe headers", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const bytes = new Uint8Array([0xba, 0xbb, 0xbe, 0xef, 0x01, 0x02, 0x03]);
+      const doc = await createDocumentFromBytes(ctx, {
+        title: "Cap Download",
+        bytes: bytes.buffer as ArrayBuffer,
+        mime_type: "application/octet-stream",
+      });
+
+      const link = await createDocumentDownloadLink(ctx, {
+        document_id: doc.id,
+        filename: "restore.bin",
+      });
+      expect(link.method).toBe("GET");
+
+      const secret = tokenFromUrl(link.url);
+      const response = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain("application/octet-stream");
+      expect(response.headers.get("content-disposition")).toContain("attachment");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-length")).toBe(String(bytes.byteLength));
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(bytes);
+    });
+
+    it("capability reuse fails after successful consumption", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "Single Use",
+        mime_type: "text/plain",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // First use succeeds
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("first"),
+      });
+      expect(r1.status).toBe(201);
+
+      // Second use with same token fails
+      const r2 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("second"),
+      });
+      expect(r2.status).toBe(401);
+      const err = await r2.json<{ error: string }>();
+      expect(err.error).toContain("expired or invalid");
+    });
+
+    it("expired capability fails closed", async () => {
+      // Insert a capability row with an already-expired expires_at directly into D1
+      const rawToken = generateToken();
+      const secretHash = await hashToken(rawToken, env.BRAINFOG_TOKEN_HASH_SECRET);
+      const db = createDb(env.DB);
+      const past = new Date(Date.now() - 3600_000); // 1 hour ago
+      await db.insert(documentTransferCapabilities).values({
+        id: "bf00000000000000000000b",
+        ownerId: "user-memory-a",
+        source: "test:direct-insert",
+        operation: "create",
+        secretHash,
+        projectId: null,
+        documentId: null,
+        title: "Expired Cap",
+        filename: null,
+        mimeType: "text/plain",
+        writeMode: null,
+        indexingMode: null,
+        maxSizeBytes: 1024,
+        expiresAt: past,
+      });
+
+      const response = await SELF.fetch(
+        `https://example.com/api/v1/document-transfers/${rawToken}`,
+        {
+          method: "POST",
+          headers: { "content-type": "text/plain" },
+          body: new TextEncoder().encode("should fail"),
+        },
+      );
+      expect(response.status).toBe(401);
+    });
+
+    it("wrong method on capability endpoint fails without mutation", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "Wrong Method",
+        mime_type: "text/plain",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // GET on a create operation should fail
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`);
+      expect(r1.status).toBe(401);
+      const err = await r1.json<{ error: string }>();
+      expect(err.error).toContain("expired or invalid");
+    });
+
+    it("wrong operation on capability endpoint fails without mutation", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const doc = await addDocument(ctx, { title: "Op Check", content: "data" });
+      const dlLink = await createDocumentDownloadLink(ctx, { document_id: doc.id });
+      const secret = tokenFromUrl(dlLink.url);
+
+      // PATCH on a download capability should fail
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("x"),
+      });
+      expect(r1.status).toBe(401);
+    });
+
+    it("oversized upload fails without mutation", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "Oversized",
+        mime_type: "application/octet-stream",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // Upload 1 byte more than the default 25 MiB limit
+      const oversized = new Uint8Array(25 * 1024 * 1024 + 1);
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: oversized,
+      });
+      expect(r1.status).toBe(400);
+      const err = await r1.json<{ error: string }>();
+      expect(err.error).toContain("exceeds maximum size");
+    });
+
+    it("existing bearer-auth direct-upload and download still work unchanged", async () => {
+      // POST create
+      const bytes = new Uint8Array([0xaa, 0xbb, 0xcc]);
+      const doc = await json<{ id: string; title: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=Bearer%20Create&mime_type=application/octet-stream",
+          { method: "POST", headers: { "content-type": "application/octet-stream" }, body: bytes },
+        ),
+      );
+      expect(doc.title).toBe("Bearer Create");
+
+      // PATCH update
+      const newBytes = new Uint8Array([0xdd, 0xee]);
+      const updated = await json<{ id: string }>(
+        await authFetch(`/api/v1/documents/${doc.id}/direct-upload?write_mode=overwrite_current`, {
+          method: "PATCH",
+          headers: { "content-type": "application/octet-stream" },
+          body: newBytes,
+        }),
+      );
+      expect(updated.id).toBe(doc.id);
+
+      // GET download (bearer)
+      const download = await authFetch(`/api/v1/documents/${doc.id}/download`);
+      expect(download.status).toBe(200);
+      expect(new Uint8Array(await download.arrayBuffer())).toEqual(newBytes);
+    });
+
+    it("capability create JSON response does not contain r2Key", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "No r2Key",
+        mime_type: "text/plain",
+      });
+      const secret = tokenFromUrl(link.url);
+      const response = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("safe content"),
+      });
+      expect(response.status).toBe(201);
+      const body = await response.json<Record<string, unknown>>();
+      expect(body.r2Key).toBeUndefined();
+      // Public fields should be present
+      expect(body.id).toBeDefined();
+      expect(body.title).toBe("No r2Key");
+      expect(body.mimeType).toBe("text/plain");
+    });
+
+    it("capability update JSON response does not contain r2Key", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const doc = await addDocument(ctx, { title: "No r2Key update", content: "before" });
+      const link = await createDocumentUploadLink(ctx, {
+        document_id: doc.id,
+        mime_type: "text/plain",
+        write_mode: "create_version",
+      });
+      const secret = tokenFromUrl(link.url);
+      const response = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("after"),
+      });
+      expect(response.status).toBe(200);
+      const body = await response.json<Record<string, unknown>>();
+      expect(body.r2Key).toBeUndefined();
+      expect(body.id).toBeDefined();
+      expect(body.currentVersionNumber).toBeDefined();
+    });
+
+    it("MIME type mismatch on create fails without mutation and capability remains retryable", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "MIME Check",
+        mime_type: "text/plain",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // Send with wrong Content-Type: application/octet-stream instead of text/plain
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "application/octet-stream" },
+        body: new TextEncoder().encode("wrong mime"),
+      });
+      expect(r1.status).toBe(400);
+      const err = await r1.json<{ error: string }>();
+      expect(err.error).toContain("content-type does not match capability mime type");
+
+      // Capability should still be retryable with correct MIME type
+      const r2 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("correct mime"),
+      });
+      expect(r2.status).toBe(201);
+      const doc = await r2.json<{ id: string }>();
+      expect(doc.id).toBeDefined();
+
+      // Second use fails (consumed)
+      const r3 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "POST",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("reuse"),
+      });
+      expect(r3.status).toBe(401);
+    });
+
+    it("MIME type mismatch on update fails without mutation and capability remains retryable", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const doc = await addDocument(ctx, { title: "MIME Update", content: "original" });
+      const link = await createDocumentUploadLink(ctx, {
+        document_id: doc.id,
+        mime_type: "text/plain",
+        write_mode: "create_version",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // Wrong MIME type
+      const r1 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/octet-stream" },
+        body: new TextEncoder().encode("wrong"),
+      });
+      expect(r1.status).toBe(400);
+
+      // Correct MIME retry succeeds
+      const r2 = await SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("correct"),
+      });
+      expect(r2.status).toBe(200);
+      const updated = await r2.json<{ id: string; currentVersionNumber: number }>();
+      expect(updated.currentVersionNumber).toBe(2);
+    });
+
+    it("download filename is bound to capability and cannot be overridden by query string", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const doc = await createDocumentFromBytes(ctx, {
+        title: "Bound DL",
+        bytes: new TextEncoder().encode("download content").buffer as ArrayBuffer,
+        mime_type: "application/octet-stream",
+      });
+
+      // Mint a download capability with bound filename
+      const link = await createDocumentDownloadLink(ctx, {
+        document_id: doc.id,
+        filename: "safe-report.bin",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // Attempt override via query string
+      const response = await SELF.fetch(
+        `https://example.com/api/v1/document-transfers/${secret}?filename=evil.bin`,
+      );
+      expect(response.status).toBe(200);
+      const disposition = response.headers.get("content-disposition") ?? "";
+      expect(disposition).toContain("safe-report.bin");
+      expect(disposition).not.toContain("evil.bin");
+    });
+
+    it("atomic consume prevents concurrent duplicate mutations", async () => {
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      const link = await createDocumentUploadLink(ctx, {
+        title: "Concurrent",
+        mime_type: "text/plain",
+      });
+      const secret = tokenFromUrl(link.url);
+
+      // Fire two uploads in parallel
+      const [r1, r2] = await Promise.all([
+        SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+          method: "POST",
+          headers: { "content-type": "text/plain" },
+          body: new TextEncoder().encode("first"),
+        }),
+        SELF.fetch(`https://example.com/api/v1/document-transfers/${secret}`, {
+          method: "POST",
+          headers: { "content-type": "text/plain" },
+          body: new TextEncoder().encode("second"),
+        }),
+      ]);
+
+      // Exactly one should succeed (201), the other must fail (401)
+      expect([r1.status, r2.status].sort()).toEqual([201, 401]);
+
+      // The successful response created exactly one document
+      const success = r1.status === 201 ? r1 : r2;
+      const doc = await success.json<{ id: string; title: string }>();
+      expect(doc.title).toBe("Concurrent");
+
+      // Verify only one document with that title exists for the user
+      const db = createDb(env.DB);
+      const matching = await db
+        .select({ id: documents.id })
+        .from(documents)
+        .where(and(eq(documents.ownerId, "user-memory-a"), eq(documents.title, "Concurrent")));
+      expect(matching.length).toBe(1);
     });
   });
 

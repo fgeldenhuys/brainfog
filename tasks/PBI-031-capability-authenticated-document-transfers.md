@@ -155,13 +155,34 @@ Expected evidence:
 
 ## Close-Out Checklist
 
-- [ ] MCP `create_document_upload_link` mints a short-lived, single-use, owner-scoped capability and returns upload instructions that do not require a bearer token.
-- [ ] MCP `create_document_download_link` mints a short-lived, single-use, owner-scoped capability and returns download instructions that do not require a bearer token.
-- [ ] Capability records/tokens bind operation, owner, project/document identity, title/filename/MIME metadata, `write_mode`, `indexing_mode`, max size, and expiry as applicable.
-- [ ] Capability-authenticated Worker upload/download endpoints enforce bound details and never expose raw R2 URLs.
-- [ ] Existing bearer-authenticated REST upload/download paths remain available for web/API compatibility.
-- [ ] D1/R2 provenance, document versioning, PDF extraction/indexing, chunk cleanup, and Vectorize semantics are preserved.
-- [ ] Expired, reused, cross-owner, mismatched-operation, and oversized transfers fail closed.
-- [ ] Logs, MCP responses, and API responses do not expose bearer tokens, raw R2 keys, document bytes, or capability token plaintext beyond the intended one-time transfer instruction.
-- [ ] `pnpm check`, `pnpm typecheck`, and `pnpm test` pass.
-- [ ] `pnpm build` passes if Worker routes, schema/migrations, or bindings changed.
+- [x] MCP `create_document_upload_link` mints a short-lived, single-use, owner-scoped capability and returns upload instructions that do not require a bearer token.
+- [x] MCP `create_document_download_link` mints a short-lived, single-use, owner-scoped capability and returns download instructions that do not require a bearer token.
+- [x] Capability records/tokens bind operation, owner, project/document identity, title/filename/MIME metadata, `write_mode`, `indexing_mode`, max size, and expiry as applicable.
+- [x] Capability-authenticated Worker upload/download endpoints enforce bound details and never expose raw R2 URLs.
+- [x] Existing bearer-authenticated REST upload/download paths remain available for web/API compatibility.
+- [x] D1/R2 provenance, document versioning, PDF extraction/indexing, chunk cleanup, and Vectorize semantics are preserved.
+- [x] Expired, reused, cross-owner, mismatched-operation, and oversized transfers fail closed.
+- [x] Logs, MCP responses, and API responses do not expose bearer tokens, raw R2 keys, document bytes, or capability token plaintext beyond the intended one-time transfer instruction.
+- [x] `pnpm check`, `pnpm typecheck`, and `pnpm test` pass.
+- [x] `pnpm build` passes if Worker routes, schema/migrations, or bindings changed.
+
+## Ship-PBI Log
+
+2026-06-30 implementation pass:
+
+- Added D1-backed `document_transfer_capabilities` records with hashed one-time secrets, expiry, consumed timestamp, owner scope, operation, bound document/project metadata, MIME type, filename, write mode, indexing mode, and upload size limit.
+- Updated MCP document upload/download link helpers to mint 15-minute capability URLs under `/api/v1/document-transfers/:secret`, with no bearer-token header or `$BRAINFOG_TOKEN` command examples.
+- Added capability-authenticated Worker transfer routes mounted before bearer-auth REST routes. Routes verify capabilities, enforce bound method/operation/MIME/filename metadata, claim capabilities with a conditional D1 update before side effects, delegate writes/downloads to the existing document service layer, and sanitize JSON responses so raw `r2Key` values remain internal.
+- Preserved existing bearer-authenticated direct upload/update/download REST routes for browser/API compatibility.
+- Added Worker/Vitest coverage for capability create/update/download without bearer tokens, exact-byte downloads, single-use/reuse failure, expiry failure, wrong method/operation, oversized upload, MIME mismatch retry behavior, bound filename behavior, sanitized responses, concurrent duplicate mutation prevention, and existing bearer-auth route compatibility.
+
+Critic iteration 1 found four blocking issues: capability JSON responses exposed raw `r2Key`, request MIME was not enforced, capability download filename could be overridden by query string, and consume-after-side-effect was race-prone. Follow-up implementation fixed all four by allowlisting response fields, enforcing normalized `Content-Type`, removing query filename override, and using a raw D1 conditional consume-before-side-effect claim.
+
+Critic iteration 2 reported no blocking issues remaining.
+
+Verification evidence:
+
+- `pnpm check` passed.
+- `pnpm typecheck` passed.
+- `pnpm test` passed: 327 tests across 12 files.
+- `pnpm build` standard script was blocked by the local Docker daemon requirement for the pre-existing Garmin Container image. Equivalent Worker deploy dry run passed with container rollout disabled: `pnpm --filter @brainfog/worker exec wrangler deploy --dry-run --outdir dist --containers-rollout=none`.

@@ -21,5 +21,6 @@ export interface Env {
   D1_DATABASE_ID: string;
   D1_REST_API_TOKEN: string;
   BRAINFOG_CONNECTOR_ENCRYPTION_KEY?: string;
+  BRAINFOG_TRUSTED_MODE?: string;
   TEST_MIGRATIONS?: D1Migration[];
 }

@@ -85,16 +85,13 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       .optional();
     const nullableString = z.string().nullable().optional();
     const projectId = z
-      .string()
-      .min(1)
+      .union([z.string().min(1), z.literal("")])
       .describe(
         "Existing project ID for project-scoped records. Omit for global/personal records; do not pass an empty string.",
       )
       .optional();
     const nullableProjectId = z
-      .string()
-      .min(1)
-      .nullable()
+      .union([z.string().min(1), z.literal(""), z.null()])
       .describe(
         "Existing project ID for project-scoped records, or null to clear project scope. Omit for global/personal records; do not pass an empty string.",
       )
@@ -134,6 +131,11 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
       .optional();
     const normalizeOptionalString = (value: unknown) =>
       typeof value === "string" && value.length > 0 ? value : undefined;
+    const omitEmptyProjectId = (args: Record<string, unknown>) => {
+      if (args.project_id !== "") return args;
+      const { project_id: _projectId, ...rest } = args;
+      return rest;
+    };
 
     // Register prompts for agent guidance on memory usage
     this.server.prompt(
@@ -399,7 +401,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         priority: z.number().min(0).max(1).optional(),
         recurrence,
       },
-      (args) => createTask(this.memoryCtx(), args),
+      (args) => createTask(this.memoryCtx(), omitEmptyProjectId(args)),
     );
     register(
       "update_task",
@@ -414,7 +416,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         priority: z.number().min(0).max(1).optional(),
         recurrence,
       },
-      ({ id, ...args }) => updateTask(this.memoryCtx(), String(id), args),
+      ({ id, ...args }) => updateTask(this.memoryCtx(), String(id), omitEmptyProjectId(args)),
     );
     register(
       "list_tasks",
@@ -435,7 +437,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         subject_id: nullableString,
         metadata: obj,
       },
-      (args) => recordTimeSeriesPoint(this.memoryCtx(), args),
+      (args) => recordTimeSeriesPoint(this.memoryCtx(), omitEmptyProjectId(args)),
     );
     register(
       "list_time_series_points",
@@ -468,7 +470,19 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           )
           .optional(),
       },
-      (args) => recordTimeSeriesPoints(this.memoryCtx(), args),
+      (args) => {
+        const points = Array.isArray(args.points)
+          ? args.points.map((point) =>
+              point && typeof point === "object"
+                ? omitEmptyProjectId(point as Record<string, unknown>)
+                : point,
+            )
+          : args.points;
+        return recordTimeSeriesPoints(this.memoryCtx(), {
+          ...args,
+          points: points as Record<string, unknown>[] | undefined,
+        });
+      },
     );
     register(
       "create_ingestion_connector",
@@ -483,7 +497,7 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         schedule: z.record(z.string(), z.unknown()).nullable().optional(),
         cursor: z.record(z.string(), z.unknown()).nullable().optional(),
       },
-      (args) => createIngestionConnector(this.memoryCtx(), args),
+      (args) => createIngestionConnector(this.memoryCtx(), omitEmptyProjectId(args)),
     );
     register("list_ingestion_connectors", "List owner-scoped ingestion connectors.", {}, () =>
       listIngestionConnectors(this.memoryCtx()),
@@ -502,7 +516,8 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
         schedule: z.record(z.string(), z.unknown()).nullable().optional(),
         cursor: z.record(z.string(), z.unknown()).nullable().optional(),
       },
-      ({ id, ...args }) => updateIngestionConnector(this.memoryCtx(), String(id), args),
+      ({ id, ...args }) =>
+        updateIngestionConnector(this.memoryCtx(), String(id), omitEmptyProjectId(args)),
     );
     register(
       "list_ingestion_runs",

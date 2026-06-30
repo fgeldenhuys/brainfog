@@ -282,7 +282,7 @@ function textFilter(column: Parameters<typeof like>[0], q: unknown): SQL<unknown
 }
 
 function dateFilter(column: Parameters<typeof gte>[0], filters: Record<string, unknown>) {
-  const out: SQL<unknown>[] = [];
+  const out: (SQL | undefined)[] = [];
   const from = asDate(filters.from);
   const to = asDate(filters.to);
   if (from) out.push(gte(column, from));
@@ -594,7 +594,7 @@ async function executeQuery(ctx: PageCtx, q: PageQuery) {
   const f = q.filters;
   const owner = ctx.user.id;
   const common = (conditions: (SQL<unknown> | undefined)[]) =>
-    and(...(conditions.filter(Boolean) as SQL<unknown>[]));
+    and(...(conditions.filter(Boolean) as (SQL | undefined)[]));
   const rows = await (async () => {
     switch (q.kind) {
       case "thoughts":
