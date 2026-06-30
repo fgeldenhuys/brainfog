@@ -1266,13 +1266,44 @@ async function resyncVectorSharedMetadata(ctx: Ctx, vectorId: string) {
 
 function chunksFor(content: string) {
   const max = 1200;
-  const overlap = 120;
   const chunks: string[] = [];
-  for (let start = 0; start < content.length; start += max - overlap) {
-    chunks.push(content.slice(start, start + max));
-    if (start + max >= content.length) break;
+
+  // Split by paragraph breaks first (double newlines)
+  const paragraphs = content.split(/\n\s*\n/);
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+
+    if (trimmed.length <= max) {
+      chunks.push(trimmed);
+      continue;
+    }
+
+    // Paragraph too long — split by sentence boundaries, preserving trailing text.
+    const sentences = trimmed.split(/(?<=[.!?])\s+/).filter(Boolean);
+    let buffer = "";
+    for (const sentence of sentences) {
+      const joined = buffer ? `${buffer} ${sentence.trim()}` : sentence.trim();
+      if (joined.length <= max) {
+        buffer = joined;
+      } else {
+        if (buffer) chunks.push(buffer);
+        // Sentence itself exceeds max — hard split
+        if (sentence.trim().length <= max) {
+          buffer = sentence.trim();
+        } else {
+          // Hard split the oversized sentence
+          for (let start = 0; start < sentence.trim().length; start += max) {
+            chunks.push(sentence.trim().slice(start, start + max));
+          }
+          buffer = "";
+        }
+      }
+    }
+    if (buffer) chunks.push(buffer);
   }
-  return chunks.length ? chunks : [""];
+
+  return chunks.length > 0 ? chunks : [""];
 }
 
 export async function createProject(
@@ -1930,11 +1961,18 @@ export async function addDocument(
   const projectId = optionalProjectId(input.project_id);
   await ensureProject(ctx, projectId);
   const db = createDb(ctx.env.DB);
+  const mimeType = input.mime_type ? validateMimeType(input.mime_type) : "text/markdown";
+  if (isPdfMimeType(mimeType)) {
+    throw new MemoryError(
+      400,
+      "PDF documents must be uploaded through the direct-upload path; use index_document_text for OCR or extracted text",
+    );
+  }
   const id = createId("document");
   await validateFactDerivations(ctx, id, input.derived_from);
   const r2Key = `${ctx.user.id}/${id}.md`;
   await ctx.env.DOCUMENTS.put(r2Key, input.content, {
-    httpMetadata: { contentType: input.mime_type ?? "text/markdown" },
+    httpMetadata: { contentType: mimeType },
   });
   const row = {
     id,
@@ -1943,7 +1981,7 @@ export async function addDocument(
     source: source(ctx),
     title: input.title,
     r2Key,
-    mimeType: input.mime_type ?? "text/markdown",
+    mimeType,
     sizeBytes: new TextEncoder().encode(input.content).byteLength,
   };
   await db.insert(documents).values(row);
@@ -1966,6 +2004,55 @@ function documentWriteMode(value: unknown): DocumentWriteMode {
     return value as DocumentWriteMode;
   }
   throw new MemoryError(400, "invalid document write_mode");
+}
+
+export type IndexingMode = "auto" | "skip";
+
+export function validateIndexingMode(value: unknown): IndexingMode {
+  if (value === undefined || value === null) return "auto";
+  if (value === "auto" || value === "skip") return value;
+  throw new MemoryError(400, "invalid indexing_mode, must be 'auto' or 'skip'");
+}
+
+function isPdfMimeType(mimeType: string) {
+  return mimeType.toLowerCase().split(";")[0]?.trim() === "application/pdf";
+}
+
+async function extractPdfText(_ctx: Ctx, bytes: ArrayBuffer): Promise<string | undefined> {
+  try {
+    const globals = globalThis as typeof globalThis & {
+      DOMMatrix?: new (...args: never[]) => unknown;
+      DOMPoint?: new (...args: never[]) => unknown;
+      Path2D?: new (...args: never[]) => unknown;
+      ImageData?: new (...args: never[]) => unknown;
+    };
+    if (!globals.DOMMatrix) globals.DOMMatrix = class {};
+    if (!globals.DOMPoint) globals.DOMPoint = class {};
+    if (!globals.Path2D) globals.Path2D = class {};
+    if (!globals.ImageData) globals.ImageData = class {};
+
+    // Dynamic import avoids pdfjs-dist's DOMMatrix dependency at module load time;
+    // in Cloudflare Workers the canvas module errors at import, so we catch it here.
+    const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+    const loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(bytes),
+      useWorkerFetch: false,
+      disableFontFace: true,
+    } as Parameters<typeof pdfjs.getDocument>[0]);
+    const pdf = await loadingTask.promise;
+    const pages: string[] = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      const text = content.items
+        .map((item: Record<string, unknown>) => String(item.str ?? ""))
+        .join(" ");
+      if (text.trim()) pages.push(text.trim());
+    }
+    return pages.length > 0 ? pages.join("\n\n") : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function safeVersionMetadata<T extends { r2Key?: string }>(row: T) {
@@ -2129,7 +2216,11 @@ function safeFilename(value?: string | null) {
 }
 
 function nextCurrentDocumentR2Key(ctx: Ctx, documentId: string, mimeType: string) {
-  const extension = isTextLikeMimeType(mimeType) ? ".txt" : ".bin";
+  const extension = isPdfMimeType(mimeType)
+    ? ".pdf"
+    : isTextLikeMimeType(mimeType)
+      ? ".txt"
+      : ".bin";
   return `${ctx.user.id}/${documentId}/current-${createId("documentVersion")}${extension}`;
 }
 
@@ -2141,6 +2232,7 @@ export async function createDocumentFromBytes(
     project_id?: string | null;
     mime_type?: string | null;
     filename?: string | null;
+    indexing_mode?: IndexingMode;
   },
 ) {
   const title = input.title.trim();
@@ -2153,13 +2245,34 @@ export async function createDocumentFromBytes(
   const db = createDb(ctx.env.DB);
   const id = createId("document");
   const mimeType = validateMimeType(input.mime_type);
+  const indexingMode = validateIndexingMode(input.indexing_mode);
+  const isPdf = isPdfMimeType(mimeType);
+
   // Decode text-like content before persisting to R2/D1 so invalid UTF-8
   // fails with 400 and leaves no stored state.
   let decodedText: string | undefined;
-  if (isTextLikeMimeType(mimeType)) {
+
+  if (isPdf && indexingMode === "auto") {
+    // Auto-indexing PDF: extract text before storing; fail closed if extraction fails
+    decodedText = await extractPdfText(ctx, input.bytes);
+    if (!decodedText) {
+      throw new MemoryError(
+        400,
+        "PDF text extraction failed. The PDF may be image-only, corrupt, or password-protected. " +
+          "Re-upload with indexing_mode=skip to store the PDF without indexing, " +
+          "or use index_document_text to supply OCR/extracted text separately.",
+      );
+    }
+  } else if (isTextLikeMimeType(mimeType)) {
     decodedText = decodeUtf8(input.bytes);
   }
-  const extension = isTextLikeMimeType(mimeType) ? ".txt" : ".bin";
+  // For PDFs with indexing_mode=skip, or non-PDF non-text MIMEs, decodedText stays undefined
+
+  const extension = isPdfMimeType(mimeType)
+    ? ".pdf"
+    : isTextLikeMimeType(mimeType)
+      ? ".txt"
+      : ".bin";
   const r2Key = `${ctx.user.id}/${id}${extension}`;
   await ctx.env.DOCUMENTS.put(r2Key, input.bytes, {
     httpMetadata: { contentType: mimeType },
@@ -2191,6 +2304,7 @@ export async function updateDocumentFromBytes(
   write_mode?: DocumentWriteMode,
   mime_type?: string | null,
   filename?: string | null,
+  indexing_mode?: IndexingMode,
 ) {
   const db = createDb(ctx.env.DB);
   const doc = await getOwnedDocument(ctx, id);
@@ -2202,13 +2316,28 @@ export async function updateDocumentFromBytes(
 
   const callerProvidedMimeType = typeof mime_type === "string" && mime_type.trim().length > 0;
   const mimeType = callerProvidedMimeType ? validateMimeType(mime_type) : doc.mimeType;
+  const indexingMode = validateIndexingMode(indexing_mode);
+  const isPdf = isPdfMimeType(mimeType);
 
   // Decode text-like content before any R2/D1 writes so invalid UTF-8
   // fails with 400 and leaves no stored state.
   let decodedText: string | undefined;
-  if (isTextLikeMimeType(mimeType)) {
+
+  if (isPdf && indexingMode === "auto") {
+    // Auto-indexing PDF: extract text before storing; fail closed if extraction fails
+    decodedText = await extractPdfText(ctx, bytes);
+    if (!decodedText) {
+      throw new MemoryError(
+        400,
+        "PDF text extraction failed. The PDF may be image-only, corrupt, or password-protected. " +
+          "Re-upload with indexing_mode=skip to store the PDF without indexing, " +
+          "or use index_document_text to supply OCR/extracted text separately.",
+      );
+    }
+  } else if (isTextLikeMimeType(mimeType)) {
     decodedText = decodeUtf8(bytes);
   }
+  // For PDFs with indexing_mode=skip, or non-PDF non-text MIMEs, decodedText stays undefined
 
   if (writeMode === "create_version") {
     const currentObject = await ctx.env.DOCUMENTS.get(doc.r2Key);
@@ -2355,6 +2484,50 @@ export async function updateDocumentFromBytes(
   return updated;
 }
 
+export async function indexDocumentText(ctx: Ctx, documentId: string, content: string) {
+  const doc = await getOwnedDocument(ctx, documentId);
+  if (!isPdfMimeType(doc.mimeType)) {
+    throw new MemoryError(400, "index_document_text is only supported for PDF documents");
+  }
+  if (!content.trim()) {
+    throw new MemoryError(400, "missing content");
+  }
+
+  const db = createDb(ctx.env.DB);
+
+  // Delete stale chunks and their vectors
+  const oldChunks = await db
+    .select({ id: documentChunks.id })
+    .from(documentChunks)
+    .where(eq(documentChunks.documentId, documentId));
+
+  if (oldChunks.length > 0) {
+    await cleanDocumentChunkGraphEdges(
+      ctx,
+      documentId,
+      oldChunks.map((c) => c.id),
+      {
+        staleReason: "document_chunks_replaced",
+      },
+    );
+    await deleteVectors(
+      ctx,
+      oldChunks.map((c) => c.id),
+    );
+    await db.delete(documentChunks).where(eq(documentChunks.documentId, documentId));
+  }
+
+  // Insert new chunks from supplied text
+  await insertChunks(ctx, documentId, content, doc.projectId, doc.shared);
+
+  await db.update(documents).set({ updatedAt: now() }).where(eq(documents.id, documentId));
+
+  // Mark downstream dependencies stale
+  await markDownstreamStale(ctx, "document", documentId);
+
+  return { ok: true, documentId };
+}
+
 export async function getDocumentBytes(ctx: Ctx, id: string) {
   const doc = (
     await createDb(ctx.env.DB)
@@ -2421,8 +2594,10 @@ export async function createDocumentUploadLink(
     project_id?: string;
     document_id?: string;
     write_mode?: string;
+    indexing_mode?: IndexingMode;
   },
 ) {
+  const indexingMode = validateIndexingMode(input.indexing_mode);
   if (input.document_id) {
     // Update mode: target an existing document
     if (input.project_id !== undefined)
@@ -2440,6 +2615,7 @@ export async function createDocumentUploadLink(
       filename: input.filename,
       mime_type: callerProvidedMimeType ? responseMimeType : undefined,
       write_mode: writeMode === "overwrite_current" ? undefined : writeMode,
+      indexing_mode: indexingMode === "auto" ? undefined : indexingMode,
     });
     return {
       url: path,
@@ -2467,6 +2643,7 @@ export async function createDocumentUploadLink(
     filename: input.filename,
     mime_type: mimeType,
     project_id: projectId ?? undefined,
+    indexing_mode: indexingMode === "auto" ? undefined : indexingMode,
   });
   return {
     url: path,
@@ -2586,6 +2763,12 @@ export async function updateDocument(
 ) {
   const db = createDb(ctx.env.DB);
   const doc = await getOwnedDocument(ctx, id);
+  if (isPdfMimeType(doc.mimeType)) {
+    throw new MemoryError(
+      400,
+      "PDF documents must be updated through the direct-upload path; use index_document_text for OCR or extracted text",
+    );
+  }
   const writeMode = (() => {
     if (typeof writeModeOrDerivedFrom === "string" || writeModeOrDerivedFrom == null) {
       return documentWriteMode(writeModeOrDerivedFrom);

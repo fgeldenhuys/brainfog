@@ -1963,6 +1963,17 @@ describe("memory model REST service", () => {
     expect(updated?.mimeType).toBe("text/markdown");
   });
 
+  it("rejects addDocument for PDF mime types", async () => {
+    const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+    await expect(
+      addDocument(ctx, {
+        title: "Inline PDF",
+        content: "not used",
+        mime_type: "application/pdf",
+      }),
+    ).rejects.toThrow(/PDF documents must be uploaded through the direct-upload path/);
+  });
+
   it("update_document preserves stale chunk-derived dependencies without dangling chunk edges", async () => {
     const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
     const doc = await addDocument(ctx, {
@@ -5147,6 +5158,231 @@ describe("Shared visibility", async () => {
       const raw = await callMcpToolRaw("delete_project", { id: project.id }, TOKEN_B);
       expect(raw.result?.isError).toBe(true);
       expect(raw.result?.content?.[0]?.text).toContain("not found");
+    });
+  });
+
+  describe("PDF text extraction and indexing", () => {
+    // Helper to create a minimal valid PDF with correct cross-reference table offsets.
+    function createMinimalPdf(text = "Hello PDF World"): Uint8Array {
+      const objects: string[] = [];
+      objects.push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj");
+      objects.push("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj");
+      objects.push(
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>\nendobj",
+      );
+      const content = `BT /F1 12 Tf 100 700 Td (${text}) Tj ET`;
+      objects.push(
+        `4 0 obj\n<< /Length ${content.length} >>\nstream\n${content}\nendstream\nendobj`,
+      );
+      objects.push("5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj");
+
+      const header = "%PDF-1.4\n%\xFF\xFF\xFF\xFF\n";
+      const headerBytes = new TextEncoder().encode(header);
+      const offsets: number[] = [];
+      const bodyParts: string[] = [];
+      let runningOffset = headerBytes.byteLength;
+      for (const obj of objects) {
+        offsets.push(runningOffset);
+        bodyParts.push(obj);
+        runningOffset += new TextEncoder().encode(`${obj}\n`).byteLength;
+      }
+      const body = `${bodyParts.join("\n")}\n`;
+
+      const bodyBytes = new TextEncoder().encode(body);
+      const xrefOffset = headerBytes.byteLength + bodyBytes.byteLength;
+
+      let xref = "xref\n";
+      xref += `0 ${objects.length + 1}\n`;
+      xref += "0000000000 65535 f \n";
+      for (const offset of offsets) {
+        xref += `${String(offset).padStart(10, "0")} 00000 n \n`;
+      }
+
+      const trailer = `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\n`;
+      const startxref = `startxref\n${xrefOffset}\n%%EOF\n`;
+
+      const full = header + body + xref + trailer + startxref;
+      return new TextEncoder().encode(full);
+    }
+
+    it("extracts text from a valid PDF and makes it recallable", async () => {
+      const pdfBytes = createMinimalPdf("extractable kaleidoscope pdf");
+      const doc = await json<{ id: string; mimeType: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=PDF%20Test&mime_type=application%2Fpdf",
+          { method: "POST", body: pdfBytes, headers: { "content-type": "application/pdf" } },
+        ),
+      );
+      expect(doc.mimeType).toBe("application/pdf");
+
+      // Chunks should exist (extracted text was indexed)
+      const chunks = await json<{ id: string; content: string }[]>(
+        await authFetch(`/api/v1/documents/${doc.id}/chunks`),
+      );
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.some((c) => c.content.includes("extractable kaleidoscope pdf"))).toBe(true);
+
+      // Should be recallable
+      const recalled = await json<{ kind: string }[]>(
+        await authFetch("/api/v1/recall?q=kaleidoscope%20extractable&kinds=document_chunk"),
+      );
+      expect(recalled.some((r) => r.kind === "document_chunk")).toBe(true);
+    });
+
+    it("rejects non-extractable PDF upload with 400", async () => {
+      const garbageBytes = new Uint8Array([0xff, 0xff, 0xff, 0xff, 0, 1, 2, 3]);
+      const response = await authFetch(
+        "/api/v1/documents/direct-upload?title=Bad%20PDF&mime_type=application%2Fpdf",
+        {
+          method: "POST",
+          body: garbageBytes,
+          headers: { "content-type": "application/pdf" },
+        },
+      );
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect(body).toHaveProperty("error");
+      expect((body as { error: string }).error).toContain("PDF text extraction failed");
+    });
+
+    it("stores PDF without indexing when indexing_mode=skip", async () => {
+      const pdfBytes = createMinimalPdf("skip mode pdf content");
+      const doc = await json<{ id: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=Skipped%20PDF&mime_type=application%2Fpdf&indexing_mode=skip",
+          { method: "POST", body: pdfBytes, headers: { "content-type": "application/pdf" } },
+        ),
+      );
+      // No chunks should be created
+      const chunks = await createDb(env.DB)
+        .select({ id: documentChunks.id })
+        .from(documentChunks)
+        .where(eq(documentChunks.documentId, doc.id));
+      expect(chunks.length).toBe(0);
+    });
+
+    it("rejects inline document updates for PDFs", async () => {
+      const pdfBytes = createMinimalPdf("existing pdf body");
+      const doc = await json<{ id: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=Update%20PDF&mime_type=application%2Fpdf",
+          { method: "POST", body: pdfBytes, headers: { "content-type": "application/pdf" } },
+        ),
+      );
+
+      const ctx = { env, user: { id: "user-memory-a", name: "Memory A" }, source: "test:service" };
+      await expect(updateDocument(ctx, doc.id, "replacement text")).rejects.toThrow(
+        /PDF documents must be updated through the direct-upload path/,
+      );
+    });
+
+    it("accepts manually supplied OCR text via index_document_text", async () => {
+      // Upload a PDF with skip mode (simulating image-only PDF)
+      const pdfBytes = createMinimalPdf("image only no text layer");
+      const doc = await json<{ id: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=OCR%20PDF&mime_type=application%2Fpdf&indexing_mode=skip",
+          { method: "POST", body: pdfBytes, headers: { "content-type": "application/pdf" } },
+        ),
+      );
+
+      // Verify no chunks initially
+      expect(
+        (
+          await createDb(env.DB)
+            .select({ id: documentChunks.id })
+            .from(documentChunks)
+            .where(eq(documentChunks.documentId, doc.id))
+        ).length,
+      ).toBe(0);
+
+      // Supply OCR text via REST
+      await json(
+        await authFetch(`/api/v1/documents/${doc.id}/indexed-text`, {
+          method: "POST",
+          body: JSON.stringify({
+            content: "Manually OCR'd text with a phosphorescent recall keyword.",
+          }),
+        }),
+      );
+
+      // Chunks should now exist
+      const chunks = await json<{ id: string; content: string }[]>(
+        await authFetch(`/api/v1/documents/${doc.id}/chunks`),
+      );
+      expect(chunks.length).toBeGreaterThan(0);
+      expect(chunks.some((c) => c.content.includes("phosphorescent recall keyword"))).toBe(true);
+
+      // Should be recallable
+      const recalled = await json<{ kind: string }[]>(
+        await authFetch("/api/v1/recall?q=phosphorescent%20recall&kinds=document_chunk"),
+      );
+      expect(recalled.some((r) => r.kind === "document_chunk")).toBe(true);
+    });
+
+    it("re-indexing via index_document_text replaces stale chunks and cleans up old vectors", async () => {
+      const pdfBytes = createMinimalPdf("first version text");
+      const doc = await json<{ id: string }>(
+        await authFetch(
+          "/api/v1/documents/direct-upload?title=Reindex%20PDF&mime_type=application%2Fpdf&indexing_mode=skip",
+          { method: "POST", body: pdfBytes, headers: { "content-type": "application/pdf" } },
+        ),
+      );
+
+      // Supply first OCR text
+      await json(
+        await authFetch(`/api/v1/documents/${doc.id}/indexed-text`, {
+          method: "POST",
+          body: JSON.stringify({ content: "First OCR text with original magneto keyword." }),
+        }),
+      );
+
+      const firstChunks = await json<{ id: string; content: string }[]>(
+        await authFetch(`/api/v1/documents/${doc.id}/chunks`),
+      );
+      expect(firstChunks.length).toBeGreaterThan(0);
+      const firstChunkId = firstChunks[0]?.id;
+
+      // Re-index with different text
+      await json(
+        await authFetch(`/api/v1/documents/${doc.id}/indexed-text`, {
+          method: "POST",
+          body: JSON.stringify({ content: "Second OCR text with updated cascade keyword." }),
+        }),
+      );
+
+      // Old chunk should be gone
+      if (firstChunkId) {
+        const oldChunk = await createDb(env.DB)
+          .select({ id: documentChunks.id })
+          .from(documentChunks)
+          .where(eq(documentChunks.id, firstChunkId))
+          .limit(1);
+        expect(oldChunk.length).toBe(0);
+      }
+
+      // New content should be recallable
+      const recalled = await json<{ kind: string }[]>(
+        await authFetch("/api/v1/recall?q=cascade%20updated&kinds=document_chunk"),
+      );
+      expect(recalled.some((r) => r.kind === "document_chunk")).toBe(true);
+    });
+
+    it("rejects index_document_text for non-PDF documents", async () => {
+      const doc = await json<{ id: string }>(
+        await authFetch("/api/v1/documents", {
+          method: "POST",
+          body: JSON.stringify({ title: "Text Doc", content: "Just a plain text document." }),
+        }),
+      );
+
+      const response = await authFetch(`/api/v1/documents/${doc.id}/indexed-text`, {
+        method: "POST",
+        body: JSON.stringify({ content: "Some indexed text" }),
+      });
+      expect(response.status).toBe(400);
+      const body = await response.json();
+      expect((body as { error: string }).error).toContain("only supported for PDF documents");
     });
   });
 });

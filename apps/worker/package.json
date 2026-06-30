@@ -23,6 +23,7 @@
     "hono": "^4.12.25",
     "mustache": "^4.2.0",
     "parse5": "^8.0.0",
+    "pdfjs-dist": "^6.1.200",
     "zod": "^4.4.3"
   },
   "devDependencies": {

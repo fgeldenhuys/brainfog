@@ -31,6 +31,7 @@ import {
   getDocumentContent,
   getDocumentVersionBytes,
   getDocumentVersionContent,
+  indexDocumentText,
   linkThought,
   listDependencies,
   listDocuments,
@@ -222,6 +223,8 @@ apiRoutes.post(
     const projectId =
       c.req.query("project_id") ?? c.req.header("x-brainfog-project-id") ?? undefined;
     const filename = c.req.query("filename") ?? c.req.header("x-brainfog-filename") ?? undefined;
+    const indexingMode =
+      c.req.query("indexing_mode") ?? c.req.header("x-brainfog-indexing-mode") ?? undefined;
     const bytes = await c.req.arrayBuffer();
     return c.json(
       await createDocumentFromBytes(ctx(c), {
@@ -230,6 +233,9 @@ apiRoutes.post(
         project_id: projectId,
         mime_type: mimeType,
         filename,
+        indexing_mode: indexingMode as Parameters<
+          typeof createDocumentFromBytes
+        >[1]["indexing_mode"],
       }),
       201,
     );
@@ -260,9 +266,19 @@ apiRoutes.patch(
     if (writeMode !== undefined && !(documentWriteModes as readonly string[]).includes(writeMode)) {
       throw new MemoryError(400, "invalid document write_mode");
     }
+    const indexingMode =
+      c.req.query("indexing_mode") ?? c.req.header("x-brainfog-indexing-mode") ?? undefined;
     const bytes = await c.req.arrayBuffer();
     return c.json(
-      await updateDocumentFromBytes(ctx(c), param(c, "id"), bytes, writeMode, mimeType, filename),
+      await updateDocumentFromBytes(
+        ctx(c),
+        param(c, "id"),
+        bytes,
+        writeMode,
+        mimeType,
+        filename,
+        indexingMode as Parameters<typeof updateDocumentFromBytes>[6],
+      ),
     );
   }),
 );
@@ -350,6 +366,15 @@ apiRoutes.get(
         "x-content-type-options": "nosniff",
       },
     });
+  }),
+);
+apiRoutes.post(
+  "/documents/:id/indexed-text",
+  route(async (c) => {
+    const payload = await body(c);
+    const content = String(payload.content ?? "");
+    if (!content.trim()) throw new MemoryError(400, "missing content");
+    return c.json(await indexDocumentText(ctx(c), param(c, "id"), content));
   }),
 );
 

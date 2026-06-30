@@ -24,6 +24,7 @@ import {
   deleteDependency,
   deleteProject,
   getDocumentVersionForMcp,
+  indexDocumentText,
   linkThought,
   listDependencies,
   listDocumentVersions,
@@ -318,6 +319,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           )
           .optional(),
         write_mode: documentWriteMode,
+        indexing_mode: z
+          .enum(["auto", "skip"])
+          .describe(
+            "Indexing mode for document uploads. 'auto' (default) attempts text extraction for PDFs and indexes chunks. 'skip' stores the document without indexing.",
+          )
+          .optional(),
       },
       (args) => {
         const hasDocId = Boolean(args.document_id);
@@ -341,6 +348,12 @@ export class BrainfogMCP extends McpAgent<Env, unknown, { user?: MemoryUser }> {
           this.memoryCtx(),
           args as Parameters<typeof createDocumentDownloadLink>[1],
         ),
+    );
+    register(
+      "index_document_text",
+      "Supply OCR/extracted text for an existing PDF document. Text is chunked, embedded, and made recallable. The original PDF bytes in R2 are not modified. Only supported for PDF documents.",
+      { document_id: z.string(), content: z.string() },
+      (args) => indexDocumentText(this.memoryCtx(), String(args.document_id), String(args.content)),
     );
     register(
       "recall",
