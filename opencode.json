@@ -23,7 +23,7 @@
   "mcp": {
     "brainfog": {
       "type": "remote",
-      "url": "https://brainfog.francois-wmgc.workers.dev/mcp",
+      "url": "https://brainfog.francois.online/mcp",
       "enabled": true,
       "headers": {
         "Authorization": "Bearer {env:BRAINFOG_BEARER_TOKEN}"
